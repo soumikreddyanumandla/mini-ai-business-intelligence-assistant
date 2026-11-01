@@ -214,7 +214,7 @@ with tab_assistant:
                 metrics=latest.get("metrics"),
             )
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"assistant_query_chart_{latest.get('intent', 'def')}")
 
         # Supporting Data Table
         if supporting:
@@ -287,13 +287,13 @@ with tab_dashboard:
             monthly_data = fetch_api("/api/analytics/monthly")
             if "monthly_trend" in monthly_data:
                 fig_trend = create_monthly_trend_chart(monthly_data["monthly_trend"])
-                st.plotly_chart(fig_trend, use_container_width=True)
+                st.plotly_chart(fig_trend, use_container_width=True, key="dashboard_monthly_trend")
 
         with row1_cols[1]:
             cat_data = fetch_api("/api/analytics/categories")
             if "categories" in cat_data:
                 fig_cat = create_category_donut_chart(cat_data["categories"])
-                st.plotly_chart(fig_cat, use_container_width=True)
+                st.plotly_chart(fig_cat, use_container_width=True, key="dashboard_category_donut")
 
         # Visualizations Row 2: Product Ranking & Regional Distribution
         row2_cols = st.columns([6, 4])
@@ -301,13 +301,13 @@ with tab_dashboard:
             prod_data = fetch_api("/api/analytics/products")
             if "ranking" in prod_data:
                 fig_prod = create_product_revenue_chart(prod_data["ranking"])
-                st.plotly_chart(fig_prod, use_container_width=True)
+                st.plotly_chart(fig_prod, use_container_width=True, key="dashboard_product_bar")
 
         with row2_cols[1]:
             reg_data = fetch_api("/api/analytics/regions")
             if "regions" in reg_data:
                 fig_reg = create_regional_bar_chart(reg_data["regions"])
-                st.plotly_chart(fig_reg, use_container_width=True)
+                st.plotly_chart(fig_reg, use_container_width=True, key="dashboard_region_bar")
 
         # Visualizations Row 3: Channel Split
         chan_data = fetch_api("/api/analytics/channels")
@@ -316,7 +316,7 @@ with tab_dashboard:
             chan_cols = st.columns([5, 5])
             with chan_cols[0]:
                 fig_chan = create_channel_donut_chart(chan_data["channels"])
-                st.plotly_chart(fig_chan, use_container_width=True)
+                st.plotly_chart(fig_chan, use_container_width=True, key="dashboard_channel_donut")
             with chan_cols[1]:
                 st.markdown("#### 🛒 Channel Performance Insights")
                 st.markdown(
@@ -348,13 +348,13 @@ with tab_deepdive:
             
             c1, c2 = st.columns(2)
             with c1:
-                st.plotly_chart(create_product_revenue_chart(p_res["ranking"]), use_container_width=True)
+                st.plotly_chart(create_product_revenue_chart(p_res["ranking"]), use_container_width=True, key="deepdive_product_rev_chart")
             with c2:
                 fig_qty = create_product_revenue_chart(
                     [{"product": r["product"], "net_revenue": r["quantity_sold"]} for r in p_res["ranking"]]
                 )
                 fig_qty.update_layout(title="<b>Product Units Sold Ranking</b>", xaxis_title="Units Sold")
-                st.plotly_chart(fig_qty, use_container_width=True)
+                st.plotly_chart(fig_qty, use_container_width=True, key="deepdive_product_qty_chart")
 
     elif view_option == "Regional Market Breakdown":
         r_res = fetch_api("/api/analytics/regions")
@@ -362,7 +362,7 @@ with tab_deepdive:
             df_r = pd.DataFrame(r_res["regions"])
             st.markdown(f"**Top Performing Region:** `{r_res.get('top_region')}` (₹{r_res.get('top_region_revenue'):,.2f})")
             st.dataframe(df_r, use_container_width=True)
-            st.plotly_chart(create_regional_bar_chart(r_res["regions"]), use_container_width=True)
+            st.plotly_chart(create_regional_bar_chart(r_res["regions"]), use_container_width=True, key="deepdive_regional_bar_chart")
 
     elif view_option == "Monthly Revenue Comparison Tool":
         st.markdown("#### Head-to-Head Month Comparison")
@@ -385,7 +385,7 @@ with tab_deepdive:
                     title=f"Comparison: {m1} vs {m2}",
                 )
                 if fig_c:
-                    st.plotly_chart(fig_c, use_container_width=True)
+                    st.plotly_chart(fig_c, use_container_width=True, key="deepdive_comparison_result_chart")
 
     elif view_option == "Channel & Category Cross-Analysis":
         c_res = fetch_api("/api/analytics/categories")
@@ -393,11 +393,11 @@ with tab_deepdive:
         col_a, col_b = st.columns(2)
         with col_a:
             if "categories" in c_res:
-                st.plotly_chart(create_category_donut_chart(c_res["categories"]), use_container_width=True)
+                st.plotly_chart(create_category_donut_chart(c_res["categories"]), use_container_width=True, key="deepdive_cat_donut_chart")
                 st.dataframe(pd.DataFrame(c_res["categories"]), use_container_width=True)
         with col_b:
             if "channels" in ch_res:
-                st.plotly_chart(create_channel_donut_chart(ch_res["channels"]), use_container_width=True)
+                st.plotly_chart(create_channel_donut_chart(ch_res["channels"]), use_container_width=True, key="deepdive_channel_donut_chart")
                 st.dataframe(pd.DataFrame(ch_res["channels"]), use_container_width=True)
 
 
