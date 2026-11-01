@@ -38,6 +38,7 @@ from backend.schemas import (
     DataQualityReport,
     ExcludedTransactionItem,
     SuggestionItem,
+    LLMConfigRequest,
 )
 
 # Configure logging
@@ -102,6 +103,70 @@ def health_check(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "llm_provider": settings.LLM_PROVIDER,
         "llm_online": llm_active,
         "version": settings.APP_VERSION,
+    }
+
+
+@app.post("/api/config/llm", tags=["System"])
+def configure_llm_key(payload: LLMConfigRequest) -> Dict[str, Any]:
+    """
+    Dynamically connects and validates the Gemini or OpenAI API key.
+    Tests the connection live and persists verified keys to the .env file.
+    """
+    success, msg = ai_service.configure_provider(
+        provider=payload.provider,
+        api_key=payload.api_key,
+        model=payload.model,
+    )
+    if not success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+
+    # Persist to .env file
+    env_file = settings.BASE_DIR / ".env"
+    try:
+        lines = []
+        if env_file.exists():
+            with open(env_file, "r") as f:
+                lines = f.readlines()
+
+        updated = {}
+        if payload.provider == "gemini":
+            updated["LLM_PROVIDER"] = "gemini"
+            updated["GEMINI_API_KEY"] = payload.api_key
+            if payload.model:
+                updated["GEMINI_MODEL"] = payload.model
+        elif payload.provider == "openai":
+            updated["LLM_PROVIDER"] = "openai"
+            updated["OPENAI_API_KEY"] = payload.api_key
+            if payload.model:
+                updated["OPENAI_MODEL"] = payload.model
+
+        new_lines = []
+        written_keys = set()
+        for line in lines:
+            line_str = line.strip()
+            if "=" in line_str and not line_str.startswith("#"):
+                k, _ = line_str.split("=", 1)
+                k = k.strip()
+                if k in updated:
+                    new_lines.append(f"{k}={updated[k]}\n")
+                    written_keys.add(k)
+                    continue
+            new_lines.append(line)
+
+        for k, v in updated.items():
+            if k not in written_keys:
+                new_lines.append(f"{k}={v}\n")
+
+        with open(env_file, "w") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        logger.warning(f"Could not persist API key to .env: {e}")
+
+    return {
+        "success": True,
+        "provider": payload.provider,
+        "message": msg,
+        "model": payload.model,
     }
 
 

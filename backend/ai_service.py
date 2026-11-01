@@ -98,6 +98,48 @@ class AIService:
             except Exception as e:
                 logger.warning(f"Failed to initialize OpenAI client: {e}")
 
+    def configure_provider(self, provider: str, api_key: str, model: Optional[str] = None) -> Tuple[bool, str]:
+        """Dynamically configures and verifies the LLM provider."""
+        clean_key = api_key.strip()
+        if not clean_key:
+            return False, "API key cannot be empty."
+
+        if provider == "gemini":
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=clean_key)
+                m_name = model or settings.GEMINI_MODEL or "gemini-1.5-flash"
+                m = genai.GenerativeModel(m_name)
+                # Verify key with test call
+                m.generate_content("Ping")
+                self.gemini_client = genai
+                settings.LLM_PROVIDER = "gemini"
+                settings.GEMINI_API_KEY = clean_key
+                settings.GEMINI_MODEL = m_name
+                logger.info(f"Gemini API key successfully verified and connected with model {m_name}.")
+                return True, f"Successfully connected to Gemini API with model {m_name}!"
+            except Exception as e:
+                logger.error(f"Failed to verify Gemini API key: {e}")
+                return False, f"Failed to connect to Gemini API: {str(e)}"
+
+        elif provider == "openai":
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=clean_key)
+                m_name = model or settings.OPENAI_MODEL or "gpt-4o-mini"
+                client.models.list()
+                self.openai_client = client
+                settings.LLM_PROVIDER = "openai"
+                settings.OPENAI_API_KEY = clean_key
+                settings.OPENAI_MODEL = m_name
+                logger.info(f"OpenAI API key successfully verified and connected with model {m_name}.")
+                return True, f"Successfully connected to OpenAI API with model {m_name}!"
+            except Exception as e:
+                logger.error(f"Failed to verify OpenAI API key: {e}")
+                return False, f"Failed to connect to OpenAI API: {str(e)}"
+
+        return False, f"Unsupported provider: '{provider}'."
+
     def is_llm_available(self) -> bool:
         """Returns True if a valid external LLM client is configured."""
         if settings.LLM_PROVIDER == "gemini" and self.gemini_client:

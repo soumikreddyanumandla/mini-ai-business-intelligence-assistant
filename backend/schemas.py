@@ -138,3 +138,10 @@ class SuggestionItem(BaseModel):
     category: str
     question: str
     description: str
+
+
+class LLMConfigRequest(BaseModel):
+    """Payload to configure or update the LLM provider key dynamically."""
+    provider: str = Field(default="gemini", description="LLM provider: 'gemini' or 'openai'")
+    api_key: str = Field(..., description="API key string")
+    model: Optional[str] = Field(default="gemini-1.5-flash", description="Model name")

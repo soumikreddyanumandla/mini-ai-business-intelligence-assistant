@@ -84,6 +84,40 @@ with st.sidebar:
         llm_status = "Online (API Key Active)" if health.get("llm_online") else "Offline (Rule-Based Fallback)"
         st.info(f"**AI Engine:** {health.get('llm_provider').title()}\n**LLM Status:** {llm_status}")
 
+    # Connect Gemini API Key Widget
+    with st.expander("🔑 Connect Gemini API Key", expanded=not health.get("llm_online", False)):
+        st.caption("Connect your Google Gemini API key to enable genuine LLM natural-language understanding:")
+        gemini_key_input = st.text_input(
+            "Gemini API Key",
+            type="password",
+            placeholder="AIzaSy...",
+            help="Generate your free key from Google AI Studio: https://aistudio.google.com/app/apikey",
+        )
+        model_choice = st.selectbox(
+            "Gemini Model",
+            ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
+            index=0,
+        )
+        if st.button("Verify & Connect Gemini 🚀", use_container_width=True):
+            if not gemini_key_input.strip():
+                st.warning("Please enter your Gemini API key.")
+            else:
+                with st.spinner("Connecting to Google Gemini API..."):
+                    res = fetch_api(
+                        "/api/config/llm",
+                        method="POST",
+                        payload={
+                            "provider": "gemini",
+                            "api_key": gemini_key_input.strip(),
+                            "model": model_choice,
+                        },
+                    )
+                    if res.get("success"):
+                        st.success(res.get("message", "Connected successfully!"))
+                        st.rerun()
+                    else:
+                        st.error(res.get("detail", res.get("error", "Failed to connect to Gemini.")))
+
     st.markdown("---")
     st.markdown("#### 🔄 Dataset Actions")
     if st.button("Reload Default Sales Dataset", use_container_width=True):

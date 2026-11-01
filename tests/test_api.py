@@ -102,3 +102,14 @@ def test_suggestions_endpoint(client):
     items = response.json()
     assert len(items) >= 5
     assert any(item["question"] == "What is the total revenue?" for item in items)
+
+
+def test_config_llm_validation(client):
+    """Test 10: POST /api/config/llm with invalid key returns HTTP 400."""
+    response = client.post("/api/config/llm", json={
+        "provider": "gemini",
+        "api_key": "invalid_test_key_123",
+        "model": "gemini-1.5-flash"
+    })
+    assert response.status_code == 400
+    assert "Failed to connect" in response.json()["detail"]
