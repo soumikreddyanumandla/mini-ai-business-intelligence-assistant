@@ -261,3 +261,105 @@ def render_dynamic_query_chart(
         return fig
 
     return None
+
+
+def create_forecasting_chart(forecast_data: Dict[str, Any]) -> go.Figure:
+    """
+    Renders an interactive time-series chart showing historical revenue,
+    projected revenue, and 80% & 95% confidence intervals.
+    """
+    fig = go.Figure()
+
+    hist_points = forecast_data.get("historical_series", [])
+    proj_points = forecast_data.get("forecast_projections", [])
+
+    if not hist_points or not proj_points:
+        fig.add_annotation(text="Insufficient data to render forecasting chart.", showarrow=False)
+        return fig
+
+    # 1. Historical Actuals Trace
+    h_x = [p["month"] for p in hist_points]
+    h_y = [p["net_revenue"] for p in hist_points]
+    h_names = [p["month_name"] for p in hist_points]
+
+    fig.add_trace(
+        go.Scatter(
+            x=h_x,
+            y=h_y,
+            mode="lines+markers",
+            name="Historical Actuals",
+            line=dict(color=COLOR_PRIMARY, width=3),
+            marker=dict(size=8, color=COLOR_PRIMARY, line=dict(width=2, color="#FFFFFF")),
+            text=h_names,
+            hovertemplate="<b>%{text}</b><br>Actual Net Revenue: ₹%{y:,.2f}<extra></extra>",
+        )
+    )
+
+    # 2. Forward Projection Trace (Connect from last historical point)
+    p_x = [h_x[-1]] + [p["month"] for p in proj_points]
+    p_y = [h_y[-1]] + [p["projected_revenue"] for p in proj_points]
+    p_names = [h_names[-1]] + [p["month_name"] for p in proj_points]
+
+    fig.add_trace(
+        go.Scatter(
+            x=p_x,
+            y=p_y,
+            mode="lines+markers",
+            name=f"Projected ({forecast_data.get('recommended_model', 'Model')})",
+            line=dict(color=COLOR_SUCCESS, width=3, dash="dash"),
+            marker=dict(size=9, color=COLOR_SUCCESS, symbol="diamond"),
+            text=p_names,
+            hovertemplate="<b>%{text}</b><br>Forecasted Revenue: ₹%{y:,.2f}<extra></extra>",
+        )
+    )
+
+    # 3. 95% Confidence Interval Band (Lower & Upper)
+    ci95_x = [p["month"] for p in proj_points]
+    ci95_upper = [p["ci_95_upper"] for p in proj_points]
+    ci95_lower = [p["ci_95_lower"] for p in proj_points]
+
+    # Upper bound
+    fig.add_trace(
+        go.Scatter(
+            x=ci95_x,
+            y=ci95_upper,
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    # Lower bound with fill
+    fig.add_trace(
+        go.Scatter(
+            x=ci95_x,
+            y=ci95_lower,
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(16, 185, 129, 0.15)",
+            name="95% Confidence Interval",
+            hoverinfo="skip",
+        )
+    )
+
+    # 4. Vertical separator line indicating forecast horizon start
+    try:
+        fig.add_vline(
+            x=h_x[-1],
+            line_width=1.5,
+            line_dash="dot",
+            line_color="#9CA3AF",
+        )
+    except Exception:
+        pass
+
+    fig.update_layout(
+        title=f"<b>Revenue Forecast & Confidence Bounds ({forecast_data.get('recommended_model', 'ML Model')})</b>",
+        xaxis_title="Month",
+        yaxis_title="Net Revenue (₹)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+        **THEME_LAYOUT,
+    )
+    return fig

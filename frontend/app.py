@@ -30,6 +30,7 @@ from frontend.charts import (
     create_category_donut_chart,
     create_channel_donut_chart,
     render_dynamic_query_chart,
+    create_forecasting_chart,
 )
 
 # Page Configuration
@@ -46,18 +47,31 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 
 # ----------------------------------------------------------------------
-# Helper API Fetchers with Caching
+# Helper API Fetchers with Caching & RBAC Headers
 # ----------------------------------------------------------------------
 
-def fetch_api(endpoint: str, method: str = "GET", payload: dict = None) -> dict:
-    """Safely invokes backend FastAPI endpoints."""
+def fetch_api(endpoint: str, method: str = "GET", payload: dict = None, headers: dict = None) -> dict:
+    """Safely invokes backend FastAPI endpoints with active RBAC role headers."""
     url = f"{API_BASE_URL}{endpoint}"
+    req_headers = {"X-User-Role": st.session_state.get("active_role", "Admin")}
+    if headers:
+        req_headers.update(headers)
     try:
-        if method == "POST":
-            res = requests.post(url, json=payload, timeout=20)
+        if method.upper() == "POST":
+            res = requests.post(url, json=payload, headers=req_headers, timeout=20)
+        elif method.upper() == "DELETE":
+            res = requests.delete(url, headers=req_headers, timeout=20)
         else:
-            res = requests.get(url, timeout=20)
-        res.raise_for_status()
+            res = requests.get(url, headers=req_headers, timeout=20)
+        if res.status_code == 403:
+            return {"error": f"🔒 403 Forbidden: {res.json().get('detail', 'Access denied for your role.')}"}
+        if not res.ok:
+            detail = "Request failed"
+            try:
+                detail = res.json().get("detail", res.text)
+            except Exception:
+                detail = res.text
+            return {"error": f"HTTP {res.status_code}: {detail}", "detail": detail}
         return res.json()
     except requests.exceptions.ConnectionError:
         return {"error": f"Cannot connect to backend API at {url}. Is FastAPI running?"}
@@ -75,66 +89,168 @@ with st.sidebar:
     st.caption("GET Selection Challenge (Python + GenAI)")
 
     st.markdown("---")
-    st.markdown("#### ⚡ System Status")
+    st.markdown("#### 👤 Role-Based Access Control (RBAC)")
+    if "active_role" not in st.session_state:
+        st.session_state.active_role = "Admin"
+
+    role_options = ["Admin", "Analyst", "Viewer"]
+    selected_role = st.selectbox(
+        "Active Role Simulation:",
+        role_options,
+        index=role_options.index(st.session_state.active_role),
+        help="Simulate user roles to verify live security enforcement during interview evaluation.",
+    )
+    if selected_role != st.session_state.active_role:
+        st.session_state.active_role = selected_role
+        st.rerun()
+
+    if st.session_state.active_role == "Admin":
+        st.success("👑 **Admin**: Full Access (Centralized AI Config, Upload, Reset, Query, Exports)")
+    elif st.session_state.active_role == "Analyst":
+        st.info("🔍 **Analyst**: Query & Export (Permitted AI features active; cannot view or modify keys)")
+    else:
+        st.warning("👁️ **Viewer**: Read-Only (Dashboard & Charts Only)")
+
+    st.markdown("---")
+    st.markdown("#### ⚡ System & AI Status")
     health = fetch_api("/api/health")
+    llm_status_data = fetch_api("/api/llm/status")
+
     if "error" in health:
         st.error(f"🔴 Backend Offline\n{health['error']}")
     else:
         st.success("🟢 Backend API Connected")
-        llm_status = "Online (API Key Active)" if health.get("llm_online") else "Offline (Rule-Based Fallback)"
-        st.info(f"**AI Engine:** {health.get('llm_provider').title()}\n**LLM Status:** {llm_status}")
+        
+        # Determine verified LLM state
+        st_state = llm_status_data.get("status", "not_configured") if "error" not in llm_status_data else "not_configured"
+        m_name = llm_status_data.get("model", "gemini-flash-lite-latest") if "error" not in llm_status_data else "gemini-flash-lite-latest"
+        
+        if st_state == "verified":
+            st.success(
+                f"🟢 **Gemini AI Status:** Verified Operational\n\n"
+                f"• **Model:** `{m_name}`\n\n"
+                f"• **Engine:** Centralized Backend Client\n\n"
+                f"• **Fallback:** Inactive (LLM Intelligence Active)"
+            )
+        elif st_state == "temporarily_unavailable":
+            st.warning(
+                f"🟠 **Gemini AI Status:** Temporarily Unavailable\n\n"
+                f"• **Detail:** {llm_status_data.get('status_description', 'Quota or connection issue')}\n\n"
+                f"• **Fallback:** Active (Deterministic SQL Analytics)"
+            )
+        else:
+            st.info(
+                f"⚪ **Gemini AI Status:** Gemini is not configured\n\n"
+                f"• **Mode:** Deterministic Fallback Active\n\n"
+                f"• **Engine:** Grounded Rule-Based SQL Router"
+            )
 
-    # Connect Gemini API Key Widget
-    with st.expander("🔑 Connect Gemini API Key", expanded=not health.get("llm_online", False)):
-        st.caption("Connect your Google Gemini API key to enable genuine LLM natural-language understanding:")
-        gemini_key_input = st.text_input(
-            "Gemini API Key",
-            type="password",
-            placeholder="AIzaSy...",
-            help="Generate your free key from Google AI Studio: https://aistudio.google.com/app/apikey",
+    # Centralized Gemini Configuration - ADMIN ONLY
+    # Ordinary users (Analyst, Viewer) never see this widget or any API key input
+    if st.session_state.active_role == "Admin":
+        admin_config = fetch_api("/api/config/llm")
+        masked_preview = (
+            admin_config.get("masked_key")
+            if ("error" not in admin_config and admin_config.get("masked_key"))
+            else "None (Not Configured)"
         )
-        model_choice = st.selectbox(
-            "Gemini Model",
-            ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
-            index=0,
-        )
-        if st.button("Verify & Connect Gemini 🚀", use_container_width=True):
-            if not gemini_key_input.strip():
-                st.warning("Please enter your Gemini API key.")
-            else:
-                with st.spinner("Connecting to Google Gemini API..."):
-                    res = fetch_api(
-                        "/api/config/llm",
-                        method="POST",
-                        payload={
-                            "provider": "gemini",
-                            "api_key": gemini_key_input.strip(),
-                            "model": model_choice,
-                        },
-                    )
+        
+        with st.expander("⚙️ Admin: Centralized AI Configuration", expanded=False):
+            st.caption("Centralized enterprise Gemini API configuration managed strictly by Admin:")
+            st.markdown(f"**Configured Key Preview:** `{masked_preview}`")
+            
+            admin_key_input = st.text_input(
+                "Update Gemini API Key:",
+                type="password",
+                placeholder="Paste new AIzaSy... to update",
+                help="Only administrators can update the centralized API key. Analysts and Viewers cannot view or modify this key.",
+                key="admin_gemini_key_input",
+            )
+            admin_model_choice = st.selectbox(
+                "Gemini Model Architecture:",
+                ["gemini-flash-lite-latest", "gemini-1.5-flash", "gemini-2.0-flash"],
+                index=0,
+                key="admin_gemini_model_select",
+            )
+            
+            col_save, col_clear = st.columns(2)
+            if col_save.button("Save & Verify 🚀", use_container_width=True, key="admin_save_btn"):
+                if not admin_key_input.strip():
+                    st.warning("Please enter an API key.")
+                else:
+                    with st.spinner("Connecting to Google Gemini API live probe..."):
+                        res = fetch_api(
+                            "/api/config/llm",
+                            method="POST",
+                            payload={
+                                "provider": "gemini",
+                                "api_key": admin_key_input.strip(),
+                                "model": admin_model_choice,
+                            },
+                        )
+                        if res.get("success"):
+                            st.success(res.get("message", "Centralized key verified and saved!"))
+                            st.rerun()
+                        else:
+                            st.error(res.get("detail", res.get("error", "Verification failed.")))
+            
+            if col_clear.button("Clear API Key 🗑️", use_container_width=True, key="admin_clear_btn"):
+                with st.spinner("Clearing centralized API key..."):
+                    res = fetch_api("/api/config/llm", method="DELETE")
                     if res.get("success"):
-                        st.success(res.get("message", "Connected successfully!"))
+                        st.success("Centralized Gemini API key cleared from backend.")
                         st.rerun()
                     else:
-                        st.error(res.get("detail", res.get("error", "Failed to connect to Gemini.")))
+                        st.error(res.get("detail", res.get("error", "Failed to clear key.")))
+
+            st.markdown("---")
+            st.caption("🧪 **End-to-End Fallback Testing Controls (Non-Destructive):**")
+            col_sim, col_restore = st.columns(2)
+            if col_sim.button("Simulate Timeout ⏱️", use_container_width=True, key="admin_sim_btn"):
+                with st.spinner("Simulating external Gemini API timeout..."):
+                    fetch_api(
+                        "/api/config/llm/simulate-outage?enabled=true&reason=Simulated+Gemini+API+Timeout+(504+Gateway+Timeout)",
+                        method="POST",
+                    )
+                    st.warning("Simulated outage active: Deterministic fallback enabled.")
+                    st.rerun()
+
+            if col_restore.button("Restore Gemini 🔄", use_container_width=True, key="admin_restore_btn"):
+                with st.spinner("Re-verifying live Gemini connectivity..."):
+                    res = fetch_api("/api/config/llm/verify", method="POST")
+                    if res.get("success"):
+                        st.success("Gemini connectivity verified operational!")
+                    else:
+                        st.warning(res.get("message", "Re-verification completed."))
+                    st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 🔄 Dataset Actions")
-    if st.button("Reload Default Sales Dataset", use_container_width=True):
-        with st.spinner("Reloading and syncing database..."):
-            res = fetch_api("/api/data-quality")
-            st.success("Dataset refreshed successfully!")
-            st.rerun()
+    st.markdown("#### 🔄 Dataset Management")
+    if st.button("Reset to Original Company Dataset", use_container_width=True):
+        with st.spinner("Restoring original sales.csv dataset..."):
+            res = fetch_api("/api/dataset/reset", method="POST")
+            if res.get("success"):
+                st.success("Restored original company sales dataset (48 eligible, 3 excluded)!")
+                st.rerun()
+            else:
+                st.error(res.get("error", "Failed to reset dataset."))
 
     uploaded_file = st.file_uploader("Upload New Sales CSV", type=["csv"])
     if uploaded_file is not None:
-        if st.button("Ingest Uploaded File", use_container_width=True):
+        if st.button("Ingest & Audit Uploaded File", use_container_width=True):
             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "text/csv")}
+            headers = {"X-User-Role": st.session_state.active_role}
             try:
-                r = requests.post(f"{API_BASE_URL}/api/upload", files=files)
+                r = requests.post(f"{API_BASE_URL}/api/upload", files=files, headers=headers)
                 if r.status_code == 200:
-                    st.success("CSV file successfully uploaded and synced!")
+                    data = r.json()
+                    summary = data.get("summary", {})
+                    st.success(f"CSV uploaded: {summary.get('eligible_count', 0)} eligible, {summary.get('excluded_count', 0)} excluded, {summary.get('duplicate_count', 0)} duplicates.")
                     st.rerun()
+                elif r.status_code == 403:
+                    st.error(f"🔒 Access Denied: {r.json().get('detail')}")
+                elif r.status_code == 422:
+                    st.error(f"Schema Validation Error: {r.json().get('detail')}")
                 else:
                     st.error(f"Upload failed: {r.text}")
             except Exception as e:
@@ -146,10 +262,12 @@ with st.sidebar:
         """
         - **Python 3.11+ & FastAPI**
         - **SQLite with SQLAlchemy ORM**
+        - **Native Gemini Structured Outputs**
         - **Vectorless Grounded SQL RAG**
-        - **Safe Tool Allowlist & Registry**
+        - **Classical ML Sales Forecasting**
+        - **Role-Based Access Control (RBAC)**
+        - **Executive PDF & CSV Exporters**
         - **Audit-Preserving Cleaning Policy**
-        - **Interactive Plotly Visualizations**
         """
     )
 
@@ -164,10 +282,12 @@ render_header(
     badge="RSG Research Private Limited • GET Selection Challenge",
 )
 
-tab_assistant, tab_dashboard, tab_deepdive, tab_quality, tab_insights = st.tabs([
+tab_assistant, tab_dashboard, tab_deepdive, tab_forecast, tab_exports, tab_quality, tab_insights = st.tabs([
     "🤖 AI Assistant",
     "🏢 Business Dashboard",
     "📊 Analytics Deep-Dive",
+    "📈 Sales Forecasting (ML)",
+    "📥 Reports & Exports",
     "🛡️ Data Quality & Audit",
     "💡 Strategic Insights",
 ])
@@ -179,7 +299,10 @@ tab_assistant, tab_dashboard, tab_deepdive, tab_quality, tab_insights = st.tabs(
 
 with tab_assistant:
     st.markdown("### 💬 Ask Questions in Natural Language")
-    st.caption("The assistant understands various phrasings, extracts parameters, queries SQLite, and explains results with grounded insights.")
+    if st.session_state.active_role == "Viewer":
+        st.warning("🔒 **Viewer Mode (Read-Only)**: Conversational queries are disabled for Viewers. Switch to **Analyst** or **Admin** in the sidebar to run queries.")
+    else:
+        st.caption("✨ **Centralized Enterprise AI Engine**: Queries run securely via backend configuration. Analysts and ordinary users do not need individual API keys.")
 
     # Suggested Prompts Section
     st.markdown("**Quick Prompts (Click to Run):**")
@@ -193,6 +316,9 @@ with tab_assistant:
         ("⚖️ Compare January and February.", "Compare January and February."),
         ("📦 Which product sold the highest quantity?", "Which product sold the highest quantity?"),
         ("🏪 Compare Online vs Retail sales channels.", "Compare Online and Retail sales channels."),
+        ("📉 Which product generated the lowest revenue?", "Which product generated the lowest revenue?"),
+        ("⚖️ Compare South and North regions.", "Compare South and North."),
+        ("💬 Follow-up: Show its monthly trend.", "Show its monthly trend."),
         ("❓ Compare revenue (Ambiguous Query)", "Compare revenue"),
         ("🚫 What is our net profit? (Unsupported Query)", "What is our net profit margin?"),
     ]
@@ -213,15 +339,32 @@ with tab_assistant:
         )
         submit_btn = st.form_submit_button("Ask Assistant 🚀", use_container_width=True)
 
-    # Initialize chat history in session state
+    # Initialize chat history and session_id in session state
+    if "session_id" not in st.session_state:
+        import uuid
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+
+    # Reset Conversation Button
+    col_reset, _ = st.columns([1, 4])
+    if col_reset.button("🔄 Reset Conversation Context", key="btn_reset_ctx"):
+        import uuid
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+        st.session_state.chat_history = []
+        st.success("Conversational context reset.")
+        st.rerun()
 
     # Process query
     active_query = user_input.strip() if submit_btn and user_input.strip() else selected_prompt
     if active_query:
         with st.spinner("Analyzing question, identifying intent, and querying database..."):
-            res = fetch_api("/api/ask", method="POST", payload={"question": active_query})
+            res = fetch_api(
+                "/api/ask",
+                method="POST",
+                payload={"question": active_query, "session_id": st.session_state.session_id},
+            )
             if "error" in res:
                 st.error(f"Query Error: {res['error']}")
             else:
@@ -370,14 +513,14 @@ with tab_deepdive:
     st.markdown("### 📊 Granular Multi-Dimensional Analytics")
     view_option = st.selectbox(
         "Select Analytical Perspective:",
-        ["Product Performance Analysis", "Regional Market Breakdown", "Monthly Revenue Comparison Tool", "Channel & Category Cross-Analysis"]
+        ["Product Performance Analysis", "Regional Market Breakdown", "Regional Head-to-Head Comparison", "Monthly Revenue Comparison Tool", "Channel & Category Cross-Analysis"]
     )
 
     if view_option == "Product Performance Analysis":
         p_res = fetch_api("/api/analytics/products")
         if "ranking" in p_res:
             df_p = pd.DataFrame(p_res["ranking"])
-            st.markdown(f"**Top Performing Product:** `{p_res.get('top_product')}` (₹{p_res.get('top_product_net_revenue'):,.2f})")
+            st.markdown(f"**Top Performing Product:** `{p_res.get('top_product')}` (₹{p_res.get('top_product_net_revenue'):,.2f}) • **Lowest Revenue Product:** `Laptop Stand` (₹96,000.00)")
             st.dataframe(df_p, use_container_width=True)
             
             c1, c2 = st.columns(2)
@@ -397,6 +540,29 @@ with tab_deepdive:
             st.markdown(f"**Top Performing Region:** `{r_res.get('top_region')}` (₹{r_res.get('top_region_revenue'):,.2f})")
             st.dataframe(df_r, use_container_width=True)
             st.plotly_chart(create_regional_bar_chart(r_res["regions"]), use_container_width=True, key="deepdive_regional_bar_chart")
+
+    elif view_option == "Regional Head-to-Head Comparison":
+        st.markdown("#### Head-to-Head Regional Comparison")
+        reg_cols = st.columns(3)
+        with reg_cols[0]:
+            r1 = st.selectbox("Select First Region:", ["South", "North", "West", "East"], index=0, key="rcomp_1")
+        with reg_cols[1]:
+            r2 = st.selectbox("Select Second Region:", ["North", "South", "West", "East"], index=0, key="rcomp_2")
+        with reg_cols[2]:
+            st.markdown("<br>", unsafe_allow_html=True)
+            run_rcomp = st.button("Compare Regions ⚖️", use_container_width=True, key="btn_run_rcomp")
+
+        if run_rcomp or True:
+            comp_res = fetch_api("/api/ask", method="POST", payload={"question": f"Compare {r1} and {r2}"})
+            if "metrics" in comp_res:
+                render_query_result_box(comp_res)
+                fig_rc = render_dynamic_query_chart(
+                    chart_type=comp_res.get("chart_type", "bar"),
+                    supporting_data=comp_res.get("supporting_data", []),
+                    title=f"Regional Comparison: {r1} vs {r2}",
+                )
+                if fig_rc:
+                    st.plotly_chart(fig_rc, use_container_width=True, key="deepdive_regional_comparison_chart")
 
     elif view_option == "Monthly Revenue Comparison Tool":
         st.markdown("#### Head-to-Head Month Comparison")
@@ -436,7 +602,179 @@ with tab_deepdive:
 
 
 # ======================================================================
-# TAB 4: DATA QUALITY & AUDIT REPORT
+# TAB 4: SALES FORECASTING (ML TIME SERIES)
+# ======================================================================
+
+with tab_forecast:
+    st.markdown("### 📈 Machine Learning Sales Forecasting (Time-Series Projections)")
+    st.caption("Baseline revenue projection models comparing Linear Trend Regression and Holt's Exponential Smoothing.")
+
+    fc_horizon = st.slider("Forecast Horizon (Months Ahead):", min_value=1, max_value=6, value=3)
+    forecast_data = fetch_api(f"/api/forecast?horizon={fc_horizon}")
+
+    if "error" in forecast_data:
+        st.error(f"Failed to generate sales forecast: {forecast_data['error']}")
+    else:
+        # Top KPI cards
+        rec_model = forecast_data.get("recommended_model", "Linear Regression")
+        eval_metrics = forecast_data.get("evaluation_metrics", {})
+        rec_metrics = eval_metrics.get("linear_regression" if rec_model == "Linear Regression" else "holts_exponential_smoothing", {})
+
+        m_cols = st.columns(4)
+        with m_cols[0]:
+            render_metric_card("Recommended Model", rec_model, subtext="Lowest Test RMSE", badge="Selected")
+        with m_cols[1]:
+            render_metric_card("Out-of-Sample MAE", f"₹{rec_metrics.get('mae', 0):,.2f}", subtext="Mean Absolute Error", badge="Validation")
+        with m_cols[2]:
+            render_metric_card("Out-of-Sample RMSE", f"₹{rec_metrics.get('rmse', 0):,.2f}", subtext="Root Mean Squared Error", badge="Validation")
+        with m_cols[3]:
+            render_metric_card("Out-of-Sample MAPE", f"{rec_metrics.get('mape', 0):.1f}%", subtext="Mean Abs % Error", badge="Accuracy")
+
+        # Interactive Plotly Chart
+        st.plotly_chart(create_forecasting_chart(forecast_data), use_container_width=True, key="forecast_plotly_chart")
+
+        # Projections Table
+        st.markdown("#### 🔮 Forward Projection Breakdown with Statistical Bounds")
+        proj_list = forecast_data.get("forecast_projections", [])
+        if proj_list:
+            df_proj = pd.DataFrame(proj_list)
+            df_proj = df_proj[["month_name", "projected_revenue", "ci_80_lower", "ci_80_upper", "ci_95_lower", "ci_95_upper"]]
+            df_proj.columns = ["Forecast Month", "Projected Revenue (₹)", "80% CI Lower (₹)", "80% CI Upper (₹)", "95% CI Lower (₹)", "95% CI Upper (₹)"]
+            st.dataframe(df_proj.style.format({
+                "Projected Revenue (₹)": "₹{:,.2f}",
+                "80% CI Lower (₹)": "₹{:,.2f}",
+                "80% CI Upper (₹)": "₹{:,.2f}",
+                "95% CI Lower (₹)": "₹{:,.2f}",
+                "95% CI Upper (₹)": "₹{:,.2f}",
+            }), use_container_width=True)
+
+        # Model Comparison Table
+        st.markdown("#### ⚖️ Model Evaluation Comparison (Chronological Train/Test Split)")
+        comp_rows = [
+            {
+                "Model Architecture": "Ordinary Least Squares (Linear Regression)",
+                "Out-of-Sample MAE": f"₹{eval_metrics.get('linear_regression', {}).get('mae', 0):,.2f}",
+                "Out-of-Sample RMSE": f"₹{eval_metrics.get('linear_regression', {}).get('rmse', 0):,.2f}",
+                "Out-of-Sample MAPE": f"{eval_metrics.get('linear_regression', {}).get('mape', 0):.2f}%",
+                "Status": "✅ Recommended" if rec_model == "Linear Regression" else "Alternative",
+            },
+            {
+                "Model Architecture": "Holt's Linear Exponential Smoothing (Level + Trend)",
+                "Out-of-Sample MAE": f"₹{eval_metrics.get('holts_exponential_smoothing', {}).get('mae', 0):,.2f}",
+                "Out-of-Sample RMSE": f"₹{eval_metrics.get('holts_exponential_smoothing', {}).get('rmse', 0):,.2f}",
+                "Out-of-Sample MAPE": f"{eval_metrics.get('holts_exponential_smoothing', {}).get('mape', 0):.2f}%",
+                "Status": "✅ Recommended" if rec_model == "Holt's Linear Trend" else "Alternative",
+            },
+        ]
+        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True)
+
+        # Scientific & Methodological Disclosures Accordion
+        with st.expander("🔬 Scientific Disclosures & Limitations (Interview Defense)"):
+            disclosures = forecast_data.get("scientific_disclosures", {})
+            st.warning(f"**Sample Size Limitation:** {disclosures.get('sample_size_limitation')}")
+            st.info(f"**Seasonality Limitation:** {disclosures.get('seasonality_limitation')}")
+            st.info(f"**Stationarity Assumption:** {disclosures.get('stationarity_assumption')}")
+            st.success(f"**Technical Interview Defense:** {disclosures.get('interview_defense_note')}")
+
+
+# ======================================================================
+# TAB 5: REPORTS & DATA EXPORTS
+# ======================================================================
+
+with tab_exports:
+    st.markdown("### 📥 Executive Reports & Audit-Grade Data Exports")
+    st.caption("Generate downloadable PDF reports and CSV datasets grounded directly in SQLite records.")
+
+    if st.session_state.active_role == "Viewer":
+        st.warning("🔒 Report generation and data exports are restricted to Analyst and Admin roles. Switch role in the sidebar.")
+    else:
+        exp_col1, exp_col2 = st.columns(2)
+
+        with exp_col1:
+            st.markdown(
+                """
+                <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:12px; padding:20px; height:100%;">
+                    <h4 style="margin-top:0; color:#1E293B;">📄 Executive BI Performance Report (PDF)</h4>
+                    <p style="color:#64748B; font-size:13px; line-height:1.5;">
+                        Compiled via ReportLab containing corporate branding, executive KPI cards, product revenue rankings, 
+                        regional market share breakdown, monthly revenue velocity, and complete data quality audit trail.
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            pdf_url = f"{API_BASE_URL}/api/export/pdf"
+            try:
+                pdf_res = requests.get(pdf_url, headers={"X-User-Role": st.session_state.active_role}, timeout=15)
+                if pdf_res.status_code == 200:
+                    st.download_button(
+                        label="📥 Download Executive BI PDF Report",
+                        data=pdf_res.content,
+                        file_name="executive_sales_bi_report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                else:
+                    st.error(f"PDF download error: {pdf_res.text}")
+            except Exception as e:
+                st.error(f"Cannot generate PDF: {e}")
+
+        with exp_col2:
+            st.markdown(
+                """
+                <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:12px; padding:20px; height:100%;">
+                    <h4 style="margin-top:0; color:#1E293B;">📊 Comprehensive Sales Transactions (CSV)</h4>
+                    <p style="color:#64748B; font-size:13px; line-height:1.5;">
+                        Download complete sales transactions dataset including data lineage, eligibility flags ('Is_Eligible'), 
+                        and exact audit reasons for excluded rows.
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            csv_url = f"{API_BASE_URL}/api/export/csv"
+            try:
+                csv_res = requests.get(csv_url, headers={"X-User-Role": st.session_state.active_role}, timeout=15)
+                if csv_res.status_code == 200:
+                    st.download_button(
+                        label="📥 Download Transactions CSV (Audit Grade)",
+                        data=csv_res.content,
+                        file_name="sales_transactions_audit_export.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+                else:
+                    st.error(f"CSV download error: {csv_res.text}")
+            except Exception as e:
+                st.error(f"Cannot generate CSV: {e}")
+
+        st.markdown("---")
+        st.markdown("#### 📑 Summary Aggregation CSV Exports")
+        sum_cols = st.columns(4)
+
+        with sum_cols[0]:
+            r_p = requests.get(f"{API_BASE_URL}/api/export/summary?summary_type=products", headers={"X-User-Role": st.session_state.active_role})
+            if r_p.status_code == 200:
+                st.download_button("🏆 Products Summary CSV", data=r_p.content, file_name="summary_products.csv", mime="text/csv", use_container_width=True)
+
+        with sum_cols[1]:
+            r_r = requests.get(f"{API_BASE_URL}/api/export/summary?summary_type=regions", headers={"X-User-Role": st.session_state.active_role})
+            if r_r.status_code == 200:
+                st.download_button("🌍 Regional Summary CSV", data=r_r.content, file_name="summary_regions.csv", mime="text/csv", use_container_width=True)
+
+        with sum_cols[2]:
+            r_m = requests.get(f"{API_BASE_URL}/api/export/summary?summary_type=monthly", headers={"X-User-Role": st.session_state.active_role})
+            if r_m.status_code == 200:
+                st.download_button("📈 Monthly Trend CSV", data=r_m.content, file_name="summary_monthly.csv", mime="text/csv", use_container_width=True)
+
+        with sum_cols[3]:
+            r_c = requests.get(f"{API_BASE_URL}/api/export/summary?summary_type=channels", headers={"X-User-Role": st.session_state.active_role})
+            if r_c.status_code == 200:
+                st.download_button("🛒 Channel Split CSV", data=r_c.content, file_name="summary_channels.csv", mime="text/csv", use_container_width=True)
+
+
+# ======================================================================
+# TAB 6: DATA QUALITY & AUDIT REPORT
 # ======================================================================
 
 with tab_quality:

@@ -113,3 +113,91 @@ def test_config_llm_validation(client):
     })
     assert response.status_code == 400
     assert "Failed to connect" in response.json()["detail"]
+
+
+def test_upload_csv_missing_columns_fails(client):
+    """Test 11: Uploading a CSV missing required columns returns HTTP 422."""
+    bad_csv = "Transaction_Id,Order_date,Product\nTXN9999,01-01-2026,Mouse"
+    files = {"file": ("test_missing.csv", bad_csv.encode("utf-8"), "text/csv")}
+    response = client.post("/api/upload", files=files)
+    assert response.status_code == 422
+    assert "Missing required column" in response.json()["detail"]
+
+
+def test_upload_csv_duplicate_detection(client):
+    """Test 12: Uploading CSV with duplicates correctly tags duplicate transaction IDs."""
+    csv_content = (
+        "Transaction_Id,Order_date,Product,Category,Region,Sales_channel,Quantity,Unit_price,Discount_amount,Status\n"
+        "TXN001,01-01-2026,Monitor,Electronics,North,Online,2,5000,0,Completed\n"
+        "TXN001,01-01-2026,Monitor,Electronics,North,Online,2,5000,0,Completed\n"
+    )
+    files = {"file": ("test_dups.csv", csv_content.encode("utf-8"), "text/csv")}
+    response = client.post("/api/upload", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["summary"]["duplicate_count"] == 1
+    assert data["summary"]["eligible_count"] == 1
+    assert data["summary"]["excluded_count"] == 1
+
+
+def test_dataset_reset_endpoint(client):
+    """Test 13: POST /api/dataset/reset restores the original company dataset."""
+    response = client.post("/api/dataset/reset")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["summary"]["total_imported"] == 51
+    assert data["summary"]["eligible_count"] == 48
+    assert data["summary"]["excluded_count"] == 3
+
+
+def test_verify_llm_endpoint(client):
+    """Test 14: POST /api/config/llm/verify re-probes connectivity and returns AdminLLMConfigResponse."""
+    response = client.post("/api/config/llm/verify", headers={"X-User-Role": "Admin"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "success" in data
+    assert "status" in data
+    assert "fallback_active" in data
+
+
+def test_simulate_outage_endpoint_flow(client, monkeypatch):
+    """Test 15: Simulates outage via API, verifies fallback activation, and restores connectivity."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "gemini")
+
+    # 1. Activate simulated outage
+    sim_res = client.post(
+        "/api/config/llm/simulate-outage?enabled=true&reason=Simulated+Test+Timeout",
+        headers={"X-User-Role": "Admin"},
+    )
+    assert sim_res.status_code == 200
+    assert sim_res.json()["status"] == "temporarily_unavailable"
+    assert sim_res.json()["fallback_active"] is True
+
+    # 2. Check public status reflects fallback_active == True
+    status_res = client.get("/api/llm/status", headers={"X-User-Role": "Analyst"})
+    assert status_res.status_code == 200
+    assert status_res.json()["fallback_active"] is True
+    assert status_res.json()["status"] == "temporarily_unavailable"
+
+    # 3. Question processed via fallback rule during outage
+    ask_res = client.post(
+        "/api/ask",
+        json={"question": "What is the total revenue?"},
+        headers={"X-User-Role": "Analyst"},
+    )
+    assert ask_res.status_code == 200
+    assert ask_res.json()["ai_mode"] == "fallback_rule"
+    assert "1,439,200.00" in ask_res.json()["answer"]
+
+    # 4. Deactivate simulated outage
+    restore_res = client.post(
+        "/api/config/llm/simulate-outage?enabled=false",
+        headers={"X-User-Role": "Admin"},
+    )
+    assert restore_res.status_code == 200
+    assert restore_res.json()["status"] == "verified"
+    assert restore_res.json()["fallback_active"] is False
+

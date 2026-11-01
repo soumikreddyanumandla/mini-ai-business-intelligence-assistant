@@ -58,6 +58,8 @@ def db_session(test_engine):
 def client(db_session, test_engine, monkeypatch):
     """FastAPI TestClient with overridden database dependency and session factory."""
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+    from backend.config import settings
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "fallback")
     monkeypatch.setattr("backend.database.engine", test_engine)
     monkeypatch.setattr("backend.database.SessionLocal", TestingSessionLocal)
     monkeypatch.setattr("backend.main.SessionLocal", TestingSessionLocal)

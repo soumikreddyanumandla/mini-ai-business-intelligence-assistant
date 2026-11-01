@@ -11,9 +11,10 @@ Serves RESTful API endpoints for the Mini AI Business Intelligence Assistant:
 
 import io
 import logging
+from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status
+from typing import Any, Dict, List, Optional
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,20 @@ from backend.analytics import (
     get_dashboard_summary_metrics,
 )
 from backend.ai_service import ai_service
+from backend.report_exporter import (
+    generate_executive_pdf_report,
+    generate_transactions_csv_export,
+    generate_analytics_summary_csv,
+)
+from backend.forecasting import generate_sales_forecast
+from backend.auth import (
+    authenticate_user,
+    UserCredentials,
+    AuthTokenResponse,
+    require_admin,
+    require_analyst_or_admin,
+    require_any_authenticated,
+)
 from backend.schemas import (
     QueryRequest,
     QueryResponse,
@@ -39,6 +54,9 @@ from backend.schemas import (
     ExcludedTransactionItem,
     SuggestionItem,
     LLMConfigRequest,
+    LLMStatusResponse,
+    AdminLLMConfigResponse,
+    LLMOutageSimRequest,
 )
 
 # Configure logging
@@ -96,21 +114,75 @@ app.add_middleware(
 def health_check(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Verifies service health, database connectivity, and configured LLM status."""
     db_ok = check_db_health()
-    llm_active = ai_service.is_llm_available()
+    status_info = ai_service.get_llm_status()
     return {
         "status": "healthy" if db_ok else "degraded",
         "database_connected": db_ok,
-        "llm_provider": settings.LLM_PROVIDER,
-        "llm_online": llm_active,
+        "llm_provider": status_info["provider"],
+        "llm_online": not status_info["fallback_active"],
+        "llm_status": status_info["status"],
+        "llm_status_detail": status_info["status_description"],
+        "fallback_active": status_info["fallback_active"],
         "version": settings.APP_VERSION,
     }
 
 
-@app.post("/api/config/llm", tags=["System"])
-def configure_llm_key(payload: LLMConfigRequest) -> Dict[str, Any]:
+@app.get("/api/llm/status", response_model=LLMStatusResponse, tags=["System"])
+def get_public_llm_status(role: str = Depends(require_any_authenticated)) -> LLMStatusResponse:
+    """
+    Public/All-roles status summary of backend centralized Gemini engine.
+    Distinguishes between configured, verified, temporarily unavailable, and deterministic fallback active.
+    Never exposes the raw or masked API key.
+    """
+    status_info = ai_service.get_llm_status()
+    return LLMStatusResponse(**status_info)
+
+
+@app.post("/api/auth/login", response_model=AuthTokenResponse, tags=["Authentication & RBAC"])
+def login_user(credentials: UserCredentials) -> AuthTokenResponse:
+    """
+    Authenticates users via username and password.
+    Returns access token, role ('Admin', 'Analyst', 'Viewer'), and allowed permissions.
+    """
+    auth_res = authenticate_user(credentials)
+    if not auth_res:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password.",
+        )
+    return AuthTokenResponse(**auth_res)
+
+
+@app.get("/api/config/llm", response_model=AdminLLMConfigResponse, tags=["System"])
+def get_admin_llm_config(role: str = Depends(require_admin)) -> AdminLLMConfigResponse:
+    """
+    Admin-only endpoint to inspect centralized LLM configuration and verification state.
+    Includes a masked preview of the configured key (e.g. 'AQ.Ab8...J7KA').
+    Analyst and Viewer roles are strictly forbidden (403).
+    """
+    status_info = ai_service.get_llm_status()
+    return AdminLLMConfigResponse(
+        success=True,
+        provider=status_info["provider"],
+        model=status_info["model"],
+        is_key_configured=status_info["is_key_configured"],
+        masked_key=ai_service.get_masked_key(),
+        status=status_info["status"],
+        status_description=status_info["status_description"],
+        fallback_active=status_info["fallback_active"],
+        message=status_info["status_description"],
+    )
+
+
+@app.post("/api/config/llm", response_model=AdminLLMConfigResponse, tags=["System"])
+def configure_llm_key(
+    payload: LLMConfigRequest,
+    role: str = Depends(require_admin),
+) -> AdminLLMConfigResponse:
     """
     Dynamically connects and validates the Gemini or OpenAI API key.
     Tests the connection live and persists verified keys to the .env file.
+    Protected by Admin RBAC role. Analyst and Viewer roles are strictly forbidden (403).
     """
     success, msg = ai_service.configure_provider(
         provider=payload.provider,
@@ -162,23 +234,136 @@ def configure_llm_key(payload: LLMConfigRequest) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Could not persist API key to .env: {e}")
 
-    return {
-        "success": True,
-        "provider": payload.provider,
-        "message": msg,
-        "model": payload.model,
-    }
+    status_info = ai_service.get_llm_status()
+    return AdminLLMConfigResponse(
+        success=True,
+        provider=status_info["provider"],
+        model=status_info["model"],
+        is_key_configured=status_info["is_key_configured"],
+        masked_key=ai_service.get_masked_key(),
+        status=status_info["status"],
+        status_description=status_info["status_description"],
+        fallback_active=status_info["fallback_active"],
+        message=msg,
+    )
+
+
+@app.delete("/api/config/llm", response_model=AdminLLMConfigResponse, tags=["System"])
+def clear_llm_key(role: str = Depends(require_admin)) -> AdminLLMConfigResponse:
+    """
+    Clears the centralized Gemini API key from memory and backend configuration.
+    Protected by Admin RBAC role. Analyst and Viewer roles are strictly forbidden (403).
+    """
+    success, msg = ai_service.clear_provider("gemini")
+
+    # Persist blank key to .env file
+    env_file = settings.BASE_DIR / ".env"
+    try:
+        if env_file.exists():
+            with open(env_file, "r") as f:
+                lines = f.readlines()
+            new_lines = []
+            for line in lines:
+                line_str = line.strip()
+                if line_str.startswith("GEMINI_API_KEY="):
+                    new_lines.append("GEMINI_API_KEY=\n")
+                else:
+                    new_lines.append(line)
+            with open(env_file, "w") as f:
+                f.writelines(new_lines)
+    except Exception as e:
+        logger.warning(f"Could not update .env on key deletion: {e}")
+
+    status_info = ai_service.get_llm_status()
+    return AdminLLMConfigResponse(
+        success=success,
+        provider=status_info["provider"],
+        model=status_info["model"],
+        is_key_configured=status_info["is_key_configured"],
+        masked_key=None,
+        status=status_info["status"],
+        status_description=status_info["status_description"],
+        fallback_active=status_info["fallback_active"],
+        message=msg,
+    )
+
+
+@app.post("/api/config/llm/verify", response_model=AdminLLMConfigResponse, tags=["System"])
+def verify_llm_connection(role: str = Depends(require_admin)) -> AdminLLMConfigResponse:
+    """
+    Performs a live connectivity probe against the centralized Gemini client.
+    Restores verified status if reachable, or marks temporarily unavailable.
+    Protected by Admin RBAC role. Analyst and Viewer are strictly forbidden (403).
+    """
+    success, msg = ai_service.verify_live_connection()
+    status_info = ai_service.get_llm_status()
+    return AdminLLMConfigResponse(
+        success=success,
+        provider=status_info["provider"],
+        model=status_info["model"],
+        is_key_configured=status_info["is_key_configured"],
+        masked_key=ai_service.get_masked_key(),
+        status=status_info["status"],
+        status_description=status_info["status_description"],
+        fallback_active=status_info["fallback_active"],
+        message=msg,
+    )
+
+
+@app.post("/api/config/llm/simulate-outage", response_model=AdminLLMConfigResponse, tags=["System"])
+def simulate_llm_outage(
+    payload: Optional[LLMOutageSimRequest] = None,
+    enabled: Optional[bool] = None,
+    reason: Optional[str] = None,
+    role: str = Depends(require_admin),
+) -> AdminLLMConfigResponse:
+    """
+    Simulates a temporary external Gemini API outage/timeout for end-to-end testing,
+    without deleting or modifying the configured API key or production configuration.
+    Accepts either JSON payload or query parameters.
+    Protected by Admin RBAC role. Analyst and Viewer are strictly forbidden (403).
+    """
+    is_enabled = True
+    outage_reason = "Simulated Gemini API Timeout (504 Gateway Timeout)"
+
+    if payload is not None:
+        is_enabled = payload.enabled
+        if payload.reason:
+            outage_reason = payload.reason
+    elif enabled is not None:
+        is_enabled = enabled
+        if reason:
+            outage_reason = reason
+
+    ai_service.simulate_outage(enabled=is_enabled, reason=outage_reason)
+    status_info = ai_service.get_llm_status()
+    return AdminLLMConfigResponse(
+        success=True,
+        provider=status_info["provider"],
+        model=status_info["model"],
+        is_key_configured=status_info["is_key_configured"],
+        masked_key=ai_service.get_masked_key(),
+        status=status_info["status"],
+        status_description=status_info["status_description"],
+        fallback_active=status_info["fallback_active"],
+        message=status_info["status_description"],
+    )
 
 
 @app.post("/api/ask", response_model=QueryResponse, tags=["AI Assistant"])
-def ask_question(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse:
+def ask_question(
+    payload: QueryRequest,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> QueryResponse:
     """
     Core AI conversational endpoint:
     Accepts natural language business questions, recognizes intent, executes approved
     SQL analytics, generates grounded explanations, and returns interactive chart metadata.
+    Protected by Analyst or Admin RBAC role.
     """
-    logger.info(f"Received user question: '{payload.question}'")
-    return ai_service.process_query(payload.question, db)
+    logger.info(f"Received user question: '{payload.question}' (session: {payload.session_id}, role: {role})")
+    return ai_service.process_query(payload.question, db, session_id=payload.session_id)
 
 
 @app.get("/api/dashboard", response_model=DashboardMetrics, tags=["Dashboard"])
@@ -337,10 +522,15 @@ def get_suggested_questions() -> List[SuggestionItem]:
 
 
 @app.post("/api/upload", tags=["Data Management"])
-async def upload_sales_dataset(file: UploadFile = File(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def upload_sales_dataset(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    role: str = Depends(require_admin),
+) -> Dict[str, Any]:
     """
     Allows users to upload a new or refreshed sales CSV dataset.
     Validates CSV headers, applies data cleaning rules, updates SQLite, and logs audit metrics.
+    Protected by Admin RBAC role.
     """
     if not file.filename.endswith(".csv"):
         raise HTTPException(
@@ -366,8 +556,109 @@ async def upload_sales_dataset(file: UploadFile = File(...), db: Session = Depen
             "success": True,
             "filename": file.filename,
             "summary": summary,
-            "message": "Dataset successfully uploaded, cleaned, and synced to SQLite database.",
+            "message": "Dataset successfully validated, cleaned, and synced to SQLite database.",
         }
+    except ValueError as e:
+        logger.warning(f"CSV schema validation failure: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
     except Exception as e:
         logger.error(f"Error processing uploaded CSV: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.post("/api/dataset/reset", tags=["Data Management"])
+def reset_to_company_dataset(
+    db: Session = Depends(get_db),
+    role: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    """
+    Restores the database to the authoritative company-provided sales dataset (data/sales.csv).
+    Guarantees baseline consistency for testing and demonstrations.
+    Protected by Admin RBAC role.
+    """
+    from backend.data_loader import reset_default_dataset
+    summary = reset_default_dataset(db=db)
+    return {
+        "success": True,
+        "message": "Database successfully reset to original company-provided dataset.",
+        "summary": summary,
+    }
+
+
+# ----------------------------------------------------------------------
+# Reports, Forecasting & Data Export Endpoints (Phase 3)
+# ----------------------------------------------------------------------
+
+@app.get("/api/export/pdf", tags=["Reporting & Exports"])
+def export_pdf_report(
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Response:
+    """
+    Generates and downloads an executive-grade Business Intelligence PDF report.
+    Grounded strictly in SQLite database metrics and audit logs.
+    Protected by Analyst or Admin role.
+    """
+    pdf_bytes = generate_executive_pdf_report(db)
+    filename = f"sales_executive_bi_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/api/export/csv", tags=["Reporting & Exports"])
+def export_transactions_csv(
+    filter_eligible: Optional[bool] = None,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Response:
+    """
+    Downloads sales transactions as a structured CSV file with audit eligibility status.
+    Protected by Analyst or Admin role.
+    """
+    csv_content = generate_transactions_csv_export(db, filter_eligible=filter_eligible)
+    filename = f"sales_transactions_{datetime.now().strftime('%Y%m%d')}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/api/export/summary", tags=["Reporting & Exports"])
+def export_summary_csv(
+    summary_type: str = "products",
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Response:
+    """
+    Downloads aggregated business intelligence summaries in CSV format.
+    Options: 'products', 'regions', 'monthly', 'channels'.
+    Protected by Analyst or Admin role.
+    """
+    csv_content = generate_analytics_summary_csv(db, summary_type=summary_type)
+    filename = f"sales_summary_{summary_type}_{datetime.now().strftime('%Y%m%d')}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/api/forecast", tags=["Machine Learning & Forecasting"])
+def get_sales_forecast_endpoint(
+    horizon: int = 3,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_any_authenticated),
+) -> Dict[str, Any]:
+    """
+    Time-series sales forecasting using Linear Trend Regression and Holt's Exponential Smoothing.
+    Evaluates out-of-sample MAE, RMSE, and MAPE, and projects revenue with confidence bounds.
+    Includes explicit scientific disclosures regarding limited historical sample size.
+    """
+    return generate_sales_forecast(db, forecast_horizon=horizon)

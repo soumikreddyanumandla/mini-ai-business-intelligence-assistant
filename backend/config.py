@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     ENVIRONMENT: str = "development"
     DEBUG: bool = False
+    BASE_DIR: Path = BASE_DIR
 
     # Server Configuration
     API_HOST: str = "127.0.0.1"
@@ -33,7 +34,7 @@ class Settings(BaseSettings):
     # Supported providers: "gemini", "openai", "fallback"
     LLM_PROVIDER: Literal["gemini", "openai", "fallback"] = "gemini"
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_MODEL: str = "gemini-flash-lite-latest"
 
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4o-mini"

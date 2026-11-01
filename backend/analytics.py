@@ -115,15 +115,20 @@ def get_highest_revenue_product(db: Session, limit: int = 1) -> Dict[str, Any]:
     }
 
 
-def get_monthly_revenue_trend(db: Session) -> Dict[str, Any]:
+def get_monthly_revenue_trend(
+    db: Session,
+    region: Optional[str] = None,
+    product: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Mandatory Question C: Monthly revenue trend.
     Aggregates revenue and volume chronologically by month (YYYY-MM).
+    Supports optional region and product filters for conversational context.
     """
     # SQLite strftime('%Y-%m', order_date)
     month_expr = func.strftime("%Y-%m", SalesTransaction.order_date)
 
-    rows = (
+    query = (
         db.query(
             month_expr.label("month"),
             func.coalesce(func.sum(SalesTransaction.net_revenue), 0.0).label("net_revenue"),
@@ -131,10 +136,17 @@ def get_monthly_revenue_trend(db: Session) -> Dict[str, Any]:
             func.count(SalesTransaction.transaction_id).label("transaction_count"),
         )
         .filter(SalesTransaction.is_eligible == True)
-        .group_by(month_expr)
-        .order_by(asc("month"))
-        .all()
     )
+
+    title_suffix = ""
+    if region:
+        query = query.filter(func.lower(SalesTransaction.region) == region.strip().lower())
+        title_suffix += f" for {region.title()} Region"
+    if product:
+        query = query.filter(func.lower(SalesTransaction.product) == product.strip().lower())
+        title_suffix += f" for {product.title()}"
+
+    rows = query.group_by(month_expr).order_by(asc("month")).all()
 
     trend = []
     prev_revenue = None
@@ -164,7 +176,9 @@ def get_monthly_revenue_trend(db: Session) -> Dict[str, Any]:
         })
 
     return {
-        "title": "Monthly Revenue Trend",
+        "title": f"Monthly Revenue Trend{title_suffix}",
+        "filtered_region": region,
+        "filtered_product": product,
         "monthly_trend": trend,
         "best_performing_month": best_month,
         "best_month_revenue": max_rev,
@@ -560,6 +574,94 @@ def compare_products(db: Session, product_1: str, product_2: str) -> Dict[str, A
     }
 
 
+def compare_regions(db: Session, region_1: str, region_2: str) -> Dict[str, Any]:
+    """Head-to-head comparison of two specific regions."""
+    r1_clean = region_1.strip().lower()
+    r2_clean = region_2.strip().lower()
+
+    rows = (
+        db.query(
+            SalesTransaction.region,
+            func.coalesce(func.sum(SalesTransaction.net_revenue), 0.0).label("net_revenue"),
+            func.coalesce(func.sum(SalesTransaction.quantity), 0).label("quantity"),
+            func.count(SalesTransaction.transaction_id).label("orders"),
+        )
+        .filter(SalesTransaction.is_eligible == True)
+        .filter(func.lower(SalesTransaction.region).in_([r1_clean, r2_clean]))
+        .group_by(SalesTransaction.region)
+        .all()
+    )
+
+    data = {r.region.lower(): {
+        "region": r.region,
+        "net_revenue": round(float(r.net_revenue), 2),
+        "quantity": int(r.quantity),
+        "orders": int(r.orders),
+    } for r in rows}
+
+    reg1_data = data.get(r1_clean, {"region": region_1.title(), "net_revenue": 0.0, "quantity": 0, "orders": 0})
+    reg2_data = data.get(r2_clean, {"region": region_2.title(), "net_revenue": 0.0, "quantity": 0, "orders": 0})
+
+    diff_rev = round(reg1_data["net_revenue"] - reg2_data["net_revenue"], 2)
+    pct_diff = round((diff_rev / reg2_data["net_revenue"]) * 100, 2) if reg2_data["net_revenue"] > 0 else 0.0
+
+    supporting = [
+        reg1_data,
+        reg2_data,
+        {"metric": f"Revenue Difference ({reg1_data['region']} - {reg2_data['region']})", "value": diff_rev, "unit": "INR"},
+        {"metric": "Percentage Difference", "value": pct_diff, "unit": "%"},
+    ]
+
+    return {
+        "title": f"Region Comparison: {reg1_data['region']} vs {reg2_data['region']}",
+        "region_1": reg1_data,
+        "region_2": reg2_data,
+        "revenue_difference": diff_rev,
+        "percentage_difference": pct_diff,
+        "supporting_data": supporting,
+        "chart_type": "bar",
+        "chart_x": "region",
+        "chart_y": "net_revenue",
+    }
+
+
+def get_lowest_performing_product(db: Session) -> Dict[str, Any]:
+    """Identifies the product with the lowest realized net sales revenue."""
+    rows = (
+        db.query(
+            SalesTransaction.product,
+            func.coalesce(func.sum(SalesTransaction.net_revenue), 0.0).label("total_net"),
+            func.coalesce(func.sum(SalesTransaction.gross_revenue), 0.0).label("total_gross"),
+            func.coalesce(func.sum(SalesTransaction.quantity), 0).label("total_qty"),
+            func.count(SalesTransaction.transaction_id).label("order_count"),
+        )
+        .filter(SalesTransaction.is_eligible == True)
+        .group_by(SalesTransaction.product)
+        .order_by(asc("total_net"))
+        .all()
+    )
+
+    if not rows:
+        return {"title": "Lowest Performing Product", "lowest_product": "N/A", "net_revenue": 0.0, "supporting_data": []}
+
+    lowest = rows[0]
+    return {
+        "title": "Lowest Performing Product by Revenue",
+        "lowest_product": lowest.product,
+        "lowest_product_net_revenue": round(float(lowest.total_net), 2),
+        "lowest_product_gross_revenue": round(float(lowest.total_gross), 2),
+        "quantity_sold": int(lowest.total_qty),
+        "order_count": int(lowest.order_count),
+        "supporting_data": [
+            {"product": r.product, "net_revenue": round(float(r.total_net), 2), "quantity": int(r.total_qty)}
+            for r in rows
+        ],
+        "chart_type": "bar",
+        "chart_x": "product",
+        "chart_y": "net_revenue",
+    }
+
+
 def get_transaction_status_breakdown(db: Session) -> Dict[str, Any]:
     """Additional Tool 11: Breakdown of all records by status (Completed, Returned, etc.)."""
     rows = (
@@ -658,3 +760,51 @@ def get_dashboard_summary_metrics(db: Session) -> Dict[str, Any]:
         "average_order_value": total_res["average_order_value"],
         "currency": "INR",
     }
+
+
+def get_data_quality_summary(db: Session) -> Dict[str, Any]:
+    """Summary of dataset quality, record eligibility, and audit counts."""
+    total_records = db.query(SalesTransaction).count()
+    eligible_count = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == True).count()
+    excluded_rows = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == False).all()
+    cleanliness = round((eligible_count / total_records) * 100, 2) if total_records > 0 else 0.0
+    return {
+        "total_records": total_records,
+        "eligible_records": eligible_count,
+        "excluded_records": len(excluded_rows),
+        "cleanliness_percentage": cleanliness,
+    }
+
+
+def get_data_quality_audit(db: Session) -> Dict[str, Any]:
+    """
+    Detailed audit of data quality issues, excluded records, and cleanliness rate.
+    Returns structured metrics and row-level excluded items with exact policy violation reasons.
+    """
+    total_records = db.query(SalesTransaction).count()
+    eligible_count = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == True).count()
+    excluded_rows = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == False).all()
+    cleanliness = round((eligible_count / total_records) * 100, 2) if total_records > 0 else 0.0
+
+    supporting_data = []
+    for r in excluded_rows:
+        supporting_data.append({
+            "Transaction ID": r.transaction_id,
+            "Date": r.order_date.isoformat() if r.order_date else "N/A",
+            "Product": r.product or "N/A",
+            "Quantity": r.quantity,
+            "Unit Price": f"₹{r.unit_price:,.2f}" if r.unit_price is not None else "Missing",
+            "Status": r.status,
+            "Exclusion Reason": r.exclusion_reason or "Business Policy Violation",
+        })
+
+    return {
+        "title": f"Data Quality Audit: {len(excluded_rows)} Issues Flagged ({cleanliness}% Cleanliness)",
+        "total_records": total_records,
+        "eligible_records": eligible_count,
+        "excluded_records": len(excluded_rows),
+        "cleanliness_percentage": cleanliness,
+        "supporting_data": supporting_data,
+        "chart_type": "table",
+    }
+

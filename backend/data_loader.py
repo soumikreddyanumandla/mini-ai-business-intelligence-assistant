@@ -21,6 +21,48 @@ from backend.models import SalesTransaction, DataQualityLog
 logger = logging.getLogger(__name__)
 
 
+MANDATORY_CSV_COLUMNS = [
+    "Transaction_Id",
+    "Order_date",
+    "Product",
+    "Category",
+    "Region",
+    "Sales_channel",
+    "Quantity",
+    "Unit_price",
+    "Discount_amount",
+    "Status",
+]
+
+
+def validate_csv_schema(fieldnames: Optional[List[str]]) -> Tuple[bool, List[str]]:
+    """
+    Validates that all mandatory column headers exist in the CSV file.
+    Case-insensitive matching to accommodate minor formatting differences.
+    """
+    if not fieldnames:
+        return False, ["CSV file has no header row or is empty."]
+
+    normalized_present = {col.strip().lower() for col in fieldnames if col}
+    missing = []
+    for required in MANDATORY_CSV_COLUMNS:
+        if required.lower() not in normalized_present:
+            missing.append(required)
+
+    if missing:
+        return False, missing
+    return True, []
+
+
+def reset_default_dataset(db: Optional[Session] = None) -> Dict[str, Any]:
+    """
+    Restores the database strictly to the original company-provided sales.csv dataset.
+    """
+    default_path = settings.BASE_DIR / "data" / "sales.csv"
+    logger.info("Restoring database to default company sales dataset.")
+    return load_and_sync_csv_to_db(csv_path=str(default_path), db=db, replace_existing=True)
+
+
 def load_and_sync_csv_to_db(
     csv_path: Optional[str] = None,
     db: Optional[Session] = None,
@@ -52,6 +94,14 @@ def load_and_sync_csv_to_db(
     try:
         with open(path_to_read, mode="r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            
+            valid_schema, missing_cols = validate_csv_schema(fieldnames)
+            if not valid_schema:
+                raise ValueError(
+                    f"CSV schema validation error: Missing required column(s): {', '.join(missing_cols)}"
+                )
+
             raw_rows = list(reader)
 
         if not raw_rows:
@@ -60,6 +110,7 @@ def load_and_sync_csv_to_db(
                 "total_imported": 0,
                 "eligible_count": 0,
                 "excluded_count": 0,
+                "duplicate_count": 0,
                 "cleanliness_rate": 0.0,
                 "excluded_records": [],
             }
@@ -74,14 +125,18 @@ def load_and_sync_csv_to_db(
         excluded_details: List[Dict[str, Any]] = []
         eligible_count = 0
         excluded_count = 0
+        duplicate_count = 0
 
         for row in raw_rows:
             val_res: RecordValidationResult = clean_and_validate_record(row)
             
             # Check for duplicate transaction_id in current import
+            db_tid = val_res.transaction_id
             if val_res.transaction_id in seen_tids:
                 val_res.is_eligible = False
                 val_res.exclusion_reasons.append("Duplicate Transaction_Id within dataset")
+                duplicate_count += 1
+                db_tid = f"{val_res.transaction_id}_DUP_{duplicate_count}"
             seen_tids.add(val_res.transaction_id)
 
             if val_res.is_eligible:
@@ -100,7 +155,7 @@ def load_and_sync_csv_to_db(
                 })
 
             txn = SalesTransaction(
-                transaction_id=val_res.transaction_id,
+                transaction_id=db_tid,
                 order_date=val_res.order_date,
                 product=val_res.product,
                 category=val_res.category,
@@ -147,6 +202,7 @@ def load_and_sync_csv_to_db(
             "total_imported": total_records,
             "eligible_count": eligible_count,
             "excluded_count": excluded_count,
+            "duplicate_count": duplicate_count,
             "cleanliness_rate": cleanliness_rate,
             "excluded_records": excluded_details,
         }

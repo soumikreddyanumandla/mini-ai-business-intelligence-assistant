@@ -163,6 +163,16 @@ def fallback_classify_intent(query: str) -> IntentInterpretation:
                 confidence=0.95,
             )
 
+        # Check if comparing specific regions
+        found_regions = [r.title() for r in ["north", "south", "east", "west"] if re.search(rf"\b{r}\b", lowered)]
+        if len(found_regions) >= 2:
+            return IntentInterpretation(
+                intent="compare_regions",
+                category=QuestionCategory.SUPPORTED,
+                parameters={"region_1": found_regions[0], "region_2": found_regions[1]},
+                confidence=0.95,
+            )
+
         # Check if comparing products
         if len(products) >= 2:
             return IntentInterpretation(
@@ -220,15 +230,38 @@ def fallback_classify_intent(query: str) -> IntentInterpretation:
             confidence=0.95,
         )
 
+    # Check Lowest Revenue/Quantity Product
+    if any(w in lowered for w in ["lowest", "least", "worst"]) and any(k in lowered for k in ["product", "selling", "item", "revenue", "quantity"]):
+        if any(v in lowered for v in ["quantity", "units", "volume"]):
+            return IntentInterpretation(
+                intent="lowest_quantity_product",
+                category=QuestionCategory.SUPPORTED,
+                confidence=0.95,
+            )
+        return IntentInterpretation(
+            intent="lowest_performing_product",
+            category=QuestionCategory.SUPPORTED,
+            confidence=0.95,
+        )
+
     # Check Monthly Trend
     if any(p in lowered for p in [
         "monthly revenue trend", "revenue month by month", "monthly trend", "month by month",
         "which month performed best", "best performing month", "revenue by month", "sales by month",
-        "monthly sales trend"
+        "monthly sales trend", "its monthly trend", "its trend"
     ]):
+        params = {}
+        for r in ["north", "south", "east", "west"]:
+            if re.search(rf"\b{r}\b", lowered):
+                params["region"] = r.title()
+                break
+        if not params and products:
+            params["product"] = products[0]
+
         return IntentInterpretation(
             intent="monthly_revenue_trend",
             category=QuestionCategory.SUPPORTED,
+            parameters=params,
             confidence=0.95,
         )
 
@@ -277,6 +310,14 @@ def fallback_classify_intent(query: str) -> IntentInterpretation:
 
     if any(p in lowered for p in ["top 5", "top five"]):
         return IntentInterpretation(intent="top_5_products", category=QuestionCategory.SUPPORTED, confidence=0.9)
+
+    if any(p in lowered for p in [
+        "data quality", "data-quality", "cleanliness", "data issue", "data issues",
+        "quality issue", "quality issues", "excluded record", "excluded records",
+        "what records were excluded", "data audit", "audit issues"
+    ]):
+        return IntentInterpretation(intent="data_quality_audit", category=QuestionCategory.SUPPORTED, confidence=0.95)
+
 
     # 6. Fallback if general sales query
     if any(w in lowered for w in ["revenue", "sales", "money", "earn"]):

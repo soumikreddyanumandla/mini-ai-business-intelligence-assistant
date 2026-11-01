@@ -136,16 +136,22 @@ registry.register(
 registry.register(
     ToolDefinition(
         name="monthly_revenue_trend",
-        description="Shows chronological month-by-month revenue, quantity sold, transaction volume, and growth rates across all recorded months.",
-        handler=lambda db, **kwargs: analytics.get_monthly_revenue_trend(db),
-        parameters_schema={"type": "object", "properties": {}},
+        description="Shows chronological month-by-month revenue, quantity sold, transaction volume, and growth rates across all recorded months, with optional region or product filters.",
+        handler=lambda db, region=None, product=None, **kwargs: analytics.get_monthly_revenue_trend(db, region=region, product=product),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "region": {"type": "string", "description": "Optional region name filter (e.g. 'South', 'North')."},
+                "product": {"type": "string", "description": "Optional product name filter (e.g. 'Monitor')."},
+            },
+        },
         sql_summary="SELECT strftime('%Y-%m', order_date) as month, SUM(net_revenue) FROM sales_transactions WHERE is_eligible = 1 GROUP BY month ORDER BY month ASC",
         default_chart_type="line",
         example_questions=[
             "What is the monthly revenue trend?",
-            "Show revenue month by month.",
+            "Show its monthly trend.",
+            "Monthly sales trend for South region.",
             "Which month performed best?",
-            "How has revenue evolved over time?",
         ],
     )
 )
@@ -363,3 +369,60 @@ registry.register(
         ],
     )
 )
+
+registry.register(
+    ToolDefinition(
+        name="compare_regions",
+        description="Compares net sales revenue, units sold, and orders between two specific regions (e.g. South vs North).",
+        handler=lambda db, region_1, region_2, **kwargs: analytics.compare_regions(db, region_1=region_1, region_2=region_2),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "region_1": {"type": "string", "description": "First region name (e.g., 'South')."},
+                "region_2": {"type": "string", "description": "Second region name (e.g., 'North')."},
+            },
+            "required": ["region_1", "region_2"],
+        },
+        sql_summary="SELECT region, SUM(net_revenue), SUM(quantity) FROM sales_transactions WHERE is_eligible = 1 AND LOWER(region) IN (:r1, :r2) GROUP BY region",
+        default_chart_type="bar",
+        example_questions=[
+            "Compare South and North.",
+            "Compare it with North.",
+            "How do South and West regions compare in sales?",
+        ],
+    )
+)
+
+registry.register(
+    ToolDefinition(
+        name="lowest_performing_product",
+        description="Identifies the product with the lowest net sales revenue.",
+        handler=lambda db, **kwargs: analytics.get_lowest_performing_product(db),
+        parameters_schema={"type": "object", "properties": {}},
+        sql_summary="SELECT product, SUM(net_revenue) AS total_net FROM sales_transactions WHERE is_eligible = 1 GROUP BY product ORDER BY total_net ASC LIMIT 1",
+        default_chart_type="bar",
+        example_questions=[
+            "Which product generated the lowest revenue?",
+            "What is our worst-performing product by sales?",
+            "Lowest revenue product.",
+        ],
+    )
+)
+
+registry.register(
+    ToolDefinition(
+        name="data_quality_audit",
+        description="Audits data quality issues, excluded records, invalid quantities, missing prices, returned orders, and dataset cleanliness percentage.",
+        handler=lambda db, **kwargs: analytics.get_data_quality_audit(db),
+        parameters_schema={"type": "object", "properties": {}},
+        sql_summary="SELECT is_eligible, exclusion_reason, count(*) FROM sales_transactions GROUP BY is_eligible, exclusion_reason",
+        default_chart_type="table",
+        example_questions=[
+            "What are the data-quality issues?",
+            "Show data quality audit.",
+            "How clean is our sales dataset?",
+            "What records were excluded and why?",
+        ],
+    )
+)
+

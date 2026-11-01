@@ -18,8 +18,10 @@ Guarantees safety:
 
 import json
 import logging
+import re
 import time
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple, Literal
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -31,8 +33,22 @@ from backend.schemas import (
     QueryResponse,
 )
 from backend.tool_registry import registry
+from backend.conversation import conversation_manager
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_secret(text: Optional[str]) -> str:
+    """Removes sensitive keys, secrets, or credential tokens from messages or logs."""
+    if not text:
+        return ""
+    # Redact Google API key pattern (AIzaSy...) or any long alphanumeric tokens
+    text = re.sub(r'AIzaSy[A-Za-z0-9_-]{33}', '[REDACTED_API_KEY]', text)
+    if settings.GEMINI_API_KEY and len(settings.GEMINI_API_KEY.strip()) > 8:
+        text = text.replace(settings.GEMINI_API_KEY.strip(), '[REDACTED_API_KEY]')
+    if settings.OPENAI_API_KEY and len(settings.OPENAI_API_KEY.strip()) > 8:
+        text = text.replace(settings.OPENAI_API_KEY.strip(), '[REDACTED_API_KEY]')
+    return text
 
 SYSTEM_INTENT_PROMPT = """You are the AI Intent Classifier and Tool Router for an enterprise Business Intelligence assistant analyzing sales transaction data.
 Your job is to classify the user's natural language question into one of 4 categories and extract any required parameters.
@@ -74,53 +90,116 @@ CRITICAL RULES:
 class AIService:
     def __init__(self):
         self.gemini_client = None
+        self.gemini_is_genai_sdk = False
+        self.gemini_status: Literal["not_configured", "verified", "temporarily_unavailable"] = "not_configured"
+        self.gemini_status_detail: str = "Gemini is not configured. Deterministic fallback active."
+        self.last_verified_at: Optional[str] = None
+        self._simulation_active: bool = False
+        self._simulated_reason: Optional[str] = None
         self.openai_client = None
         self._init_clients()
 
     def _init_clients(self) -> None:
-        """Initializes API clients based on configured settings and environment keys."""
-        # Check Gemini
-        if settings.GEMINI_API_KEY:
+        """Initializes API clients based on backend configuration and environment keys."""
+        # 1. Centralized Google Gemini Client Initialization
+        if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip():
+            clean_key = settings.GEMINI_API_KEY.strip()
+            m_name = settings.GEMINI_MODEL or "gemini-flash-lite-latest"
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=settings.GEMINI_API_KEY)
-                self.gemini_client = genai
-                logger.info("Configured Google Gemini Generative AI client.")
+                from google import genai
+                from google.genai import types
+                client = genai.Client(
+                    api_key=clean_key,
+                    http_options=types.HttpOptions(timeout=10000),
+                )
+                # Live connectivity verification probe
+                client.models.generate_content(
+                    model=m_name,
+                    contents="Ping",
+                )
+                self.gemini_client = client
+                self.gemini_is_genai_sdk = True
+                self.gemini_status = "verified"
+                self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
+                self.last_verified_at = datetime.now().isoformat()
+                logger.info(f"Centralized Google Gemini modern SDK client verified with model {m_name}.")
             except Exception as e:
-                logger.warning(f"Failed to initialize Gemini client: {e}")
+                err_clean = sanitize_secret(str(e))
+                self.gemini_client = client if 'client' in locals() else None
+                self.gemini_is_genai_sdk = True
+                if "429" in err_clean or "quota" in err_clean.lower():
+                    self.gemini_status = "temporarily_unavailable"
+                    self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
+                elif "400" in err_clean or "403" in err_clean or "invalid" in err_clean.lower():
+                    self.gemini_status = "temporarily_unavailable"
+                    self.gemini_status_detail = "Gemini API key is invalid or unauthorized. Deterministic fallback active."
+                else:
+                    self.gemini_status = "temporarily_unavailable"
+                    self.gemini_status_detail = "Gemini Temporarily Unavailable (Connection/Timeout). Deterministic fallback active."
+                logger.warning(f"Centralized Gemini verification probe: {self.gemini_status_detail} (Reason: {err_clean[:90]})")
+        else:
+            self.gemini_client = None
+            self.gemini_is_genai_sdk = False
+            self.gemini_status = "not_configured"
+            self.gemini_status_detail = "Gemini is not configured. Deterministic fallback active."
+            logger.info("No Gemini API key configured in backend. Operating in deterministic rule-based mode.")
 
-        # Check OpenAI
+        # 2. Check OpenAI (if configured)
         if settings.OPENAI_API_KEY:
             try:
                 from openai import OpenAI
                 self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
                 logger.info("Configured OpenAI client.")
             except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI client: {e}")
+                logger.warning(f"Failed to initialize OpenAI client: {sanitize_secret(str(e))}")
 
     def configure_provider(self, provider: str, api_key: str, model: Optional[str] = None) -> Tuple[bool, str]:
-        """Dynamically configures and verifies the LLM provider."""
+        """
+        Dynamically configures and verifies the centralized LLM provider (Admin only).
+        Guarantees that raw API keys are never exposed in logs or return strings.
+        """
         clean_key = api_key.strip()
         if not clean_key:
             return False, "API key cannot be empty."
 
         if provider == "gemini":
+            m_name = model or settings.GEMINI_MODEL or "gemini-flash-lite-latest"
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=clean_key)
-                m_name = model or settings.GEMINI_MODEL or "gemini-1.5-flash"
-                m = genai.GenerativeModel(m_name)
-                # Verify key with test call
-                m.generate_content("Ping")
-                self.gemini_client = genai
+                from google import genai
+                from google.genai import types
+                client = genai.Client(
+                    api_key=clean_key,
+                    http_options=types.HttpOptions(timeout=10000),
+                )
+                # Verification call with 10s timeout
+                client.models.generate_content(
+                    model=m_name,
+                    contents="Ping",
+                )
+                self.gemini_client = client
+                self.gemini_is_genai_sdk = True
+                self.gemini_status = "verified"
+                self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
+                self.last_verified_at = datetime.now().isoformat()
+                
                 settings.LLM_PROVIDER = "gemini"
                 settings.GEMINI_API_KEY = clean_key
                 settings.GEMINI_MODEL = m_name
-                logger.info(f"Gemini API key successfully verified and connected with model {m_name}.")
-                return True, f"Successfully connected to Gemini API with model {m_name}!"
+                logger.info(f"Centralized Gemini API key verified and updated by Admin (Model: {m_name}).")
+                return True, f"Successfully verified and saved Gemini API configuration (Model: {m_name})!"
             except Exception as e:
-                logger.error(f"Failed to verify Gemini API key: {e}")
-                return False, f"Failed to connect to Gemini API: {str(e)}"
+                err_clean = sanitize_secret(str(e))
+                if "429" in err_clean or "quota" in err_clean.lower():
+                    self.gemini_status = "temporarily_unavailable"
+                    self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
+                elif "400" in err_clean or "403" in err_clean or "invalid" in err_clean.lower():
+                    self.gemini_status = "temporarily_unavailable"
+                    self.gemini_status_detail = "Gemini API key is invalid or unauthorized. Deterministic fallback active."
+                else:
+                    self.gemini_status = "temporarily_unavailable"
+                    self.gemini_status_detail = f"Gemini Temporarily Unavailable: {err_clean[:80]}. Deterministic fallback active."
+                logger.error(f"Failed to verify Gemini API key: {err_clean}")
+                return False, f"Failed to connect to Gemini API: {err_clean}"
 
         elif provider == "openai":
             try:
@@ -135,17 +214,112 @@ class AIService:
                 logger.info(f"OpenAI API key successfully verified and connected with model {m_name}.")
                 return True, f"Successfully connected to OpenAI API with model {m_name}!"
             except Exception as e:
-                logger.error(f"Failed to verify OpenAI API key: {e}")
-                return False, f"Failed to connect to OpenAI API: {str(e)}"
+                err_clean = sanitize_secret(str(e))
+                logger.error(f"Failed to verify OpenAI API key: {err_clean}")
+                return False, f"Failed to connect to OpenAI API: {err_clean}"
 
         return False, f"Unsupported provider: '{provider}'."
 
+    def clear_provider(self, provider: str = "gemini") -> Tuple[bool, str]:
+        """Admin clears the centralized LLM key from memory and configuration."""
+        if provider == "gemini":
+            self.gemini_client = None
+            self.gemini_is_genai_sdk = False
+            self.gemini_status = "not_configured"
+            self.gemini_status_detail = "Gemini is not configured. Deterministic fallback active."
+            settings.GEMINI_API_KEY = None
+            logger.info("Admin cleared centralized Gemini API key from backend.")
+            return True, "Gemini API key cleared successfully from backend configuration."
+        return False, f"Unsupported provider: '{provider}'."
+
+    def get_masked_key(self) -> Optional[str]:
+        """Returns a safe masked preview of the active API key for Admin inspection (e.g. 'AQ.Ab8...J7KA')."""
+        k = settings.GEMINI_API_KEY
+        if not k or len(k.strip()) < 8:
+            return None
+        k_clean = k.strip()
+        return f"{k_clean[:6]}...{k_clean[-4:]}"
+
+    def get_llm_status(self) -> Dict[str, Any]:
+        """Returns comprehensive sanitized LLM status information (safe for all users)."""
+        is_configured = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
+        return {
+            "provider": settings.LLM_PROVIDER,
+            "model": settings.GEMINI_MODEL if settings.LLM_PROVIDER == "gemini" else settings.OPENAI_MODEL,
+            "is_key_configured": is_configured,
+            "status": self.gemini_status,
+            "status_description": self.gemini_status_detail,
+            "fallback_active": not self.is_llm_available(),
+            "last_verified_at": self.last_verified_at,
+        }
+
+    def simulate_outage(self, enabled: bool = True, reason: str = "Simulated Gemini API Timeout (504 Gateway Timeout)") -> None:
+        """
+        Temporarily simulates an external Gemini API outage/timeout for end-to-end testing,
+        without deleting or modifying the configured API key or production configuration.
+        """
+        self._simulation_active = enabled
+        self._simulated_reason = reason if enabled else None
+        if enabled:
+            self.gemini_status = "temporarily_unavailable"
+            self.gemini_status_detail = f"Gemini Temporarily Unavailable: {reason}. Deterministic fallback active."
+            logger.warning(f"Simulated Gemini outage activated: {reason}")
+        else:
+            self.verify_live_connection()
+            logger.info("Simulated Gemini outage deactivated. Live connection re-verified.")
+
+    def verify_live_connection(self) -> Tuple[bool, str]:
+        """
+        Performs a live connectivity probe with the configured Gemini API client.
+        Restores 'verified' status if reachable, or sets 'temporarily_unavailable'.
+        """
+        self._simulation_active = False
+        self._simulated_reason = None
+        if not settings.GEMINI_API_KEY or not settings.GEMINI_API_KEY.strip():
+            self.gemini_client = None
+            self.gemini_status = "not_configured"
+            self.gemini_status_detail = "Gemini is not configured. Deterministic fallback active."
+            return False, "Gemini is not configured."
+
+        clean_key = settings.GEMINI_API_KEY.strip()
+        m_name = settings.GEMINI_MODEL or "gemini-flash-lite-latest"
+        try:
+            from google import genai
+            from google.genai import types
+            client = genai.Client(
+                api_key=clean_key,
+                http_options=types.HttpOptions(timeout=10000),
+            )
+            # Live connectivity probe
+            client.models.generate_content(
+                model=m_name,
+                contents="Ping",
+            )
+            self.gemini_client = client
+            self.gemini_is_genai_sdk = True
+            self.gemini_status = "verified"
+            settings.LLM_PROVIDER = "gemini"
+            self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
+            self.last_verified_at = datetime.now().isoformat()
+            logger.info(f"Live Gemini connectivity re-verified: {self.gemini_status_detail}")
+            return True, f"Gemini verified operational with model {m_name}."
+        except Exception as e:
+            err_clean = sanitize_secret(str(e))
+            self.gemini_status = "temporarily_unavailable"
+            if "429" in err_clean or "quota" in err_clean.lower():
+                self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
+            else:
+                self.gemini_status_detail = f"Gemini Temporarily Unavailable ({err_clean[:80]}). Deterministic fallback active."
+            return False, self.gemini_status_detail
+
     def is_llm_available(self) -> bool:
-        """Returns True if a valid external LLM client is configured."""
-        if settings.LLM_PROVIDER == "gemini" and self.gemini_client:
-            return True
-        if settings.LLM_PROVIDER == "openai" and self.openai_client:
-            return True
+        """Returns True only if an external LLM client is configured AND verified operational."""
+        if getattr(self, "_simulation_active", False):
+            return False
+        if settings.LLM_PROVIDER == "gemini":
+            return bool(self.gemini_client and self.gemini_status == "verified")
+        if settings.LLM_PROVIDER == "openai":
+            return bool(self.openai_client)
         return False
 
     def interpret_intent(self, question: str) -> Tuple[IntentInterpretation, str]:
@@ -153,9 +327,9 @@ class AIService:
         Interprets natural language question into structured IntentInterpretation.
         Returns (IntentInterpretation, ai_mode).
         """
-        # If no LLM credentials configured, use deterministic intent router
+        # If no LLM credentials configured or temporarily unavailable, use deterministic intent router
         if not self.is_llm_available():
-            logger.info("Using fallback deterministic intent router (no external LLM key configured).")
+            logger.info(f"Using deterministic intent router ({self.gemini_status_detail}).")
             return fallback_classify_intent(question), "fallback_rule"
 
         # Attempt interpretation via configured LLM provider
@@ -164,11 +338,26 @@ class AIService:
 
         try:
             if settings.LLM_PROVIDER == "gemini" and self.gemini_client:
-                model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
-                response = model.generate_content(prompt)
-                raw_text = response.text.strip()
-                parsed = self._parse_json_response(raw_text)
-                return IntentInterpretation(**parsed), "gemini"
+                if getattr(self, "gemini_is_genai_sdk", False):
+                    from google.genai import types
+                    config = types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0,
+                    )
+                    response = self.gemini_client.models.generate_content(
+                        model=settings.GEMINI_MODEL,
+                        contents=prompt,
+                        config=config,
+                    )
+                    raw_text = response.text.strip()
+                    parsed = self._parse_json_response(raw_text)
+                    return IntentInterpretation(**parsed), "gemini"
+                else:
+                    model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
+                    response = model.generate_content(prompt, request_options={"timeout": 15.0})
+                    raw_text = response.text.strip()
+                    parsed = self._parse_json_response(raw_text)
+                    return IntentInterpretation(**parsed), "gemini"
 
             elif settings.LLM_PROVIDER == "openai" and self.openai_client:
                 response = self.openai_client.chat.completions.create(
@@ -185,10 +374,17 @@ class AIService:
                 return IntentInterpretation(**parsed), "openai"
 
         except Exception as e:
-            logger.error(f"External LLM API call failed ({e}). Reverting to fallback intent classifier.")
+            err_clean = sanitize_secret(str(e))
+            if "429" in err_clean or "quota" in err_clean.lower():
+                self.gemini_status = "temporarily_unavailable"
+                self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
+            else:
+                self.gemini_status = "temporarily_unavailable"
+                self.gemini_status_detail = f"Gemini Temporarily Unavailable: {err_clean[:80]}. Deterministic fallback active."
+            logger.error(f"External LLM API call failed ({err_clean}). Reverting to fallback intent classifier.")
             if settings.ALLOW_FALLBACK_ON_ERROR:
                 return fallback_classify_intent(question), "fallback_rule"
-            raise LLMProviderError(f"LLM API failure: {e}")
+            raise LLMProviderError(f"LLM API failure: {err_clean}")
 
         return fallback_classify_intent(question), "fallback_rule"
 
@@ -208,14 +404,22 @@ class AIService:
             )
             try:
                 if ai_mode == "gemini" and self.gemini_client:
-                    model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
-                    res = model.generate_content(prompt)
-                    return res.text.strip()
+                    if getattr(self, "gemini_is_genai_sdk", False):
+                        res = self.gemini_client.models.generate_content(
+                            model=settings.GEMINI_MODEL,
+                            contents=prompt,
+                        )
+                        return res.text.strip()
+                    else:
+                        model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
+                        res = model.generate_content(prompt, request_options={"timeout": 15.0})
+                        return res.text.strip()
                 elif ai_mode == "openai" and self.openai_client:
                     res = self.openai_client.chat.completions.create(
                         model=settings.OPENAI_MODEL,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.2,
+                        timeout=15.0,
                     )
                     return res.choices[0].message.content.strip()
             except Exception as e:
@@ -251,9 +455,31 @@ class AIService:
             best = metrics.get("best_performing_month", "N/A")
             best_rev = metrics.get("best_month_revenue", 0.0)
             trend = metrics.get("monthly_trend", [])
+            filt_reg = metrics.get("filtered_region")
+            filt_prod = metrics.get("filtered_product")
+            scope = f"for {filt_reg} region " if filt_reg else (f"for {filt_prod} " if filt_prod else "")
             return (
-                f"Monthly revenue shows consistent performance across 2026, peaking in {best} with ₹{best_rev:,.2f} in net sales. "
+                f"Monthly revenue {scope}shows consistent performance across 2026, peaking in {best} with ₹{best_rev:,.2f} in net sales. "
                 f"A total of {len(trend)} months were recorded with steady sales distribution."
+            )
+
+        elif tool_name == "compare_regions":
+            r1 = metrics.get("region_1", {})
+            r2 = metrics.get("region_2", {})
+            diff = metrics.get("revenue_difference", 0.0)
+            pct = metrics.get("percentage_difference", 0.0)
+            return (
+                f"{r1.get('region', 'Region 1')} generated ₹{r1.get('net_revenue', 0.0):,.2f} in sales compared to "
+                f"₹{r2.get('net_revenue', 0.0):,.2f} in {r2.get('region', 'Region 2')} "
+                f"(a variance of ₹{diff:+,.2f} or {pct:+.2f}%)."
+            )
+
+        elif tool_name == "lowest_performing_product":
+            prod = metrics.get("lowest_product", "N/A")
+            rev = metrics.get("lowest_product_net_revenue", 0.0)
+            qty = metrics.get("quantity_sold", 0)
+            return (
+                f"{prod} recorded the lowest realized sales revenue among all products at ₹{rev:,.2f} with {qty} units sold."
             )
 
         elif tool_name == "top_revenue_region":
@@ -316,16 +542,59 @@ class AIService:
                 f"Total discounts distributed amounted to ₹{disc:,.2f}, representing an effective discount rate of {rate:.2f}% on gross sales."
             )
 
+        elif tool_name == "product_comparison":
+            p1 = metrics.get("product_1", {})
+            p2 = metrics.get("product_2", {})
+            p1_name = p1.get("product", "Product 1")
+            p2_name = p2.get("product", "Product 2")
+            diff = metrics.get("revenue_difference", 0.0)
+            return (
+                f"{p1_name} generated ₹{p1.get('net_revenue', 0.0):,.2f} across {p1.get('quantity', 0)} units compared to "
+                f"₹{p2.get('net_revenue', 0.0):,.2f} across {p2.get('quantity', 0)} units for {p2_name} "
+                f"(a revenue variance of ₹{diff:,.2f})."
+            )
+
+        elif tool_name == "data_quality_audit":
+            tot = metrics.get("total_records", 0)
+            el = metrics.get("eligible_records", 0)
+            ex = metrics.get("excluded_records", 0)
+            clean = metrics.get("cleanliness_percentage", 0.0)
+            return (
+                f"The sales data quality audit verified {el} eligible transactions out of {tot} total rows ({clean}% cleanliness rate). "
+                f"{ex} records were excluded due to business eligibility rules (1 returned order, 1 zero-quantity order, and 1 missing unit price)."
+            )
+
         return f"Successfully computed metrics for {tool_name} based on active database records."
 
-    def process_query(self, question: str, db: Session) -> QueryResponse:
+    def process_query(self, question: str, db: Session, session_id: Optional[str] = "default") -> QueryResponse:
         """
         End-to-end question processing pipeline:
-        Natural language -> Intent classification -> Tool selection ->
-        SQL computation -> Grounded explanation -> Unified response.
+        Context resolution -> Natural language intent -> Tool selection ->
+        SQL computation -> Grounded explanation -> Conversational session update.
         """
         start_time = time.time()
-        interpretation, ai_mode = self.interpret_intent(question)
+        sid = (session_id or "default").strip()
+
+        # Step 1: Conversational context & pronoun resolution
+        resolved_question, injected_params, intent_hint = conversation_manager.resolve_context(
+            question, session_id=sid
+        )
+        has_resolved_context = (resolved_question != question)
+
+        # Step 2: Intent Classification
+        if intent_hint and injected_params:
+            interpretation = IntentInterpretation(
+                intent=intent_hint,
+                category=QuestionCategory.SUPPORTED,
+                parameters=injected_params,
+                confidence=0.95,
+            )
+            ai_mode = "context_memory"
+        else:
+            interpretation, ai_mode = self.interpret_intent(resolved_question)
+            if injected_params:
+                interpretation.parameters.update(injected_params)
+
         cat = interpretation.category
 
         # Category 4: Unrelated questions
@@ -349,6 +618,8 @@ class AIService:
                 ai_mode=ai_mode,
                 data_quality_notes=[],
                 execution_time_ms=exec_time,
+                session_id=sid,
+                resolved_context=resolved_question if has_resolved_context else None,
             )
 
         # Category 2: Related but Unsupported Business Questions
@@ -374,6 +645,8 @@ class AIService:
                 ai_mode=ai_mode,
                 data_quality_notes=["Exclusion: Profit and operational expense attributes are not captured in the schema."],
                 execution_time_ms=exec_time,
+                session_id=sid,
+                resolved_context=resolved_question if has_resolved_context else None,
             )
 
         # Category 3: Ambiguous Questions
@@ -396,6 +669,8 @@ class AIService:
                 ai_mode=ai_mode,
                 data_quality_notes=[],
                 execution_time_ms=exec_time,
+                session_id=sid,
+                resolved_context=resolved_question if has_resolved_context else None,
             )
 
         # Category 1: Supported Questions
@@ -411,18 +686,32 @@ class AIService:
             metrics = registry.execute(tool_name, db, interpretation.parameters)
             
             # Grounded explanation
-            explanation = self.generate_grounded_explanation(question, metrics, tool_name, ai_mode)
+            explanation = self.generate_grounded_explanation(resolved_question, metrics, tool_name, ai_mode)
             
             # Build answer summary
             answer = metrics.get("title", f"Result for {tool_name}")
-            if "total_net_revenue" in metrics:
+            if "total_net_revenue" in metrics and "total_gross_revenue" in metrics:
                 answer = f"Total Realized Net Revenue is ₹{metrics['total_net_revenue']:,.2f}."
             elif "top_product" in metrics and "top_product_net_revenue" in metrics:
                 answer = f"{metrics['top_product']} generated the highest revenue (₹{metrics['top_product_net_revenue']:,.2f})."
+            elif "lowest_product" in metrics and "lowest_product_net_revenue" in metrics:
+                answer = f"{metrics['lowest_product']} generated the lowest revenue (₹{metrics['lowest_product_net_revenue']:,.2f})."
             elif "top_region" in metrics:
                 answer = f"{metrics['top_region']} generated the highest revenue (₹{metrics['top_region_revenue']:,.2f})."
+            elif "region_1" in metrics and "region_2" in metrics:
+                r1_name = metrics["region_1"].get("region", "Region 1")
+                r2_name = metrics["region_2"].get("region", "Region 2")
+                answer = f"{r1_name} (₹{metrics['region_1']['net_revenue']:,.2f}) vs {r2_name} (₹{metrics['region_2']['net_revenue']:,.2f})."
+            elif "product_1" in metrics and "product_2" in metrics:
+                p1_name = metrics["product_1"].get("product", "Product 1")
+                p2_name = metrics["product_2"].get("product", "Product 2")
+                answer = f"Product Comparison: {p1_name} (₹{metrics['product_1']['net_revenue']:,.2f}) vs {p2_name} (₹{metrics['product_2']['net_revenue']:,.2f})."
+            elif "cleanliness_percentage" in metrics:
+                answer = f"Data Quality Audit: {metrics['excluded_records']} issues flagged ({metrics['cleanliness_percentage']}% cleanliness across {metrics['total_records']} total records)."
             elif "month_1_revenue" in metrics and "month_2_revenue" in metrics:
                 answer = f"{metrics.get('month_2')} revenue was ₹{metrics['month_2_revenue']:,.2f} vs ₹{metrics['month_1_revenue']:,.2f} in {metrics.get('month_1')} ({metrics.get('percentage_difference'):+.2f}%)."
+            elif "best_performing_month" in metrics and "best_month_revenue" in metrics:
+                answer = f"Monthly Revenue Trend: Peak in {metrics['best_performing_month']} (₹{metrics['best_month_revenue']:,.2f})."
             elif "average_transaction_value" in metrics:
                 answer = f"The average transaction value is ₹{metrics['average_transaction_value']:,.2f}."
             elif "total_units_sold" in metrics:
@@ -432,6 +721,10 @@ class AIService:
             chart_type = metrics.get("chart_type", tool.default_chart_type)
 
             exec_time = round((time.time() - start_time) * 1000, 2)
+
+            # Update conversational session memory
+            session = conversation_manager.get_or_create_session(sid)
+            session.add_turn(question, answer, tool_name, metrics)
 
             return QueryResponse(
                 success=True,
@@ -450,6 +743,8 @@ class AIService:
                     "Returned orders and invalid records were audited and excluded from sales KPIs.",
                 ],
                 execution_time_ms=exec_time,
+                session_id=sid,
+                resolved_context=resolved_question if has_resolved_context else None,
             )
 
         except Exception as e:

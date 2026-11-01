@@ -3,10 +3,12 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com/)
+[![Google GenAI](https://img.shields.io/badge/Google%20GenAI-SDK%202.0%2B-4285F4.svg)](https://cloud.google.com/vertex-ai/generative-ai/docs)
 [![SQLite](https://img.shields.io/badge/Database-SQLite%203-003B57.svg)](https://www.sqlite.org/)
 [![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-FF4B4B.svg)](https://streamlit.io/)
 [![Plotly](https://img.shields.io/badge/Charts-Plotly-3F4F75.svg)](https://plotly.com/)
-[![Pytest](https://img.shields.io/badge/Tests-39%20Passed-brightgreen.svg)](https://docs.pytest.org/)
+[![ReportLab](https://img.shields.io/badge/Reports-ReportLab%20PDF-E11D48.svg)](https://www.reportlab.com/)
+[![Pytest](https://img.shields.io/badge/Tests-66%20Passed-brightgreen.svg)](https://docs.pytest.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -18,17 +20,18 @@ In enterprise environments, business executives and operational managers frequen
 - *"Which product generated the highest revenue?"*
 - *"What is our monthly sales trajectory?"*
 - *"How did sales change between March and May?"*
+- *"Compare it with North region."* (Multi-turn conversational follow-up)
 
-Traditionally, answering these questions requires either writing SQL queries or waiting for data analytics teams to build custom dashboards.
+Traditionally, answering these questions requires either writing complex SQL queries or waiting days for business intelligence teams to build custom reports.
 
-The **Mini AI Business Intelligence Assistant** bridges this gap by enabling non-technical stakeholders to ask questions in plain natural language and receive **100% mathematically accurate, database-backed answers**, interactive Plotly charts, and evidence-grounded business insights.
+The **Mini AI Business Intelligence Assistant** bridges this gap by enabling non-technical stakeholders to ask questions in natural language and receive **100% mathematically accurate, database-backed answers**, interactive Plotly charts, executive PDF/CSV exports, ML-driven forward projections, and evidence-grounded business insights.
 
 ### Key Architectural Principle: Vectorless Structured RAG
-Unlike traditional document-based RAG that relies on approximate vector similarities and frequently suffers from LLM arithmetic hallucinations, this system employs **Vectorless SQL RAG**:
-1. The LLM acts as an **intent classifier and tool router**.
-2. Aggregations (`SUM`, `COUNT`, `AVG`, `GROUP BY`) execute directly on an **indexed SQLite database**.
-3. Verified numerical results are passed back to the LLM to generate **grounded business commentary**.
-4. The system operates with **zero hallucinations** and guarantees 100% mathematical fidelity.
+Unlike traditional document-based RAG that relies on approximate vector embeddings and frequently suffers from LLM arithmetic hallucinations, this system employs **Vectorless SQL RAG with Decoupled Tool Calling**:
+1. Google's modern `google-genai` SDK performs **Intent Classification & Parameter Extraction** via **Native Structured Outputs**.
+2. Aggregations (`SUM`, `COUNT`, `AVG`, `GROUP BY`) execute directly on an **indexed SQLite database** using pre-compiled SQLAlchemy ORM queries.
+3. Verified numerical results are passed back to the LLM to generate **evidence-grounded business commentary**.
+4. The system operates with **zero arithmetic hallucinations**, eliminates SQL injection vectors, and provides a deterministic fallback router for 100% offline availability.
 
 ---
 
@@ -232,7 +235,7 @@ streamlit run frontend/app.py --server.port 8501
 
 ## 9. Automated Testing & Verification
 
-The test suite contains **39 comprehensive automated tests** with zero external network dependencies:
+The test suite contains **66 comprehensive automated tests** with zero external network dependencies, verifying analytics correctness, API contracts, data quality governance, multi-turn memory, ML forecasting, and RBAC:
 
 ```bash
 # Run the complete test suite
@@ -242,55 +245,17 @@ The test suite contains **39 comprehensive automated tests** with zero external 
 venv/bin/pytest -v
 ```
 
-### Verified Test Results:
+### Verified Test Breakdown (66 Tests Passing):
+- **AI Service & Conversational Memory (`tests/test_ai_service.py`):** 15 tests (Phrasings, multi-turn follow-ups, antecedent resolution, fallback router, edge cases).
+- **Core Analytics Engine (`tests/test_analytics.py`):** 11 tests (Total revenue, product rankings, monthly trends, regional comparisons, discounts, channels).
+- **REST API Endpoints (`tests/test_api.py`):** 13 tests (Health checks, asking questions, validation errors, duplicate detection, dataset reset).
+- **Data Quality & Audit Policy (`tests/test_data_quality.py`):** 7 tests (Status exclusions, zero quantity, negative values, missing prices, date formats).
+- **Report & Data Exporters (`tests/test_exports.py`):** 6 tests (ReportLab PDF generation, transactions CSV, eligible-only CSV, summary CSVs).
+- **Machine Learning Forecasting (`tests/test_forecasting.py`):** 5 tests (OLS linear regression, Holt's smoothing, out-of-sample MAE/RMSE/MAPE, confidence interval consistency, scientific disclosures).
+- **Role-Based Access Control (`tests/test_rbac.py`):** 9 tests (Password hashing, login tokens, permission enforcement, 403 Forbidden checks, backward compatibility).
+
 ```text
-============================= test session starts ==============================
-platform darwin -- Python 3.11.18, pytest-9.2.0, pluggy-1.7.0
-rootdir: /Users/.../mini-bi-assistant
-plugins: anyio-4.16.0
-collected 39 items
-
-tests/test_ai_service.py::test_supported_total_revenue_phrasings PASSED  [  2%]
-tests/test_ai_service.py::test_supported_top_product_phrasings PASSED    [  5%]
-tests/test_ai_service.py::test_supported_monthly_trend_phrasings PASSED  [  7%]
-tests/test_ai_service.py::test_supported_region_phrasings PASSED         [ 10%]
-tests/test_ai_service.py::test_supported_month_comparison_extraction PASSED [ 12%]
-tests/test_ai_service.py::test_unsupported_business_questions PASSED     [ 15%]
-tests/test_ai_service.py::test_ambiguous_comparison_question PASSED      [ 17%]
-tests/test_ai_service.py::test_unrelated_trivia_question PASSED          [ 20%]
-tests/test_ai_service.py::test_empty_query_handling PASSED               [ 23%]
-tests/test_ai_service.py::test_end_to_end_query_processing PASSED        [ 25%]
-tests/test_ai_service.py::test_llm_api_failure_fallback PASSED           [ 28%]
-tests/test_ai_service.py::test_invalid_llm_json_fallback PASSED          [ 30%]
-tests/test_analytics.py::test_total_revenue_calculation PASSED           [ 33%]
-tests/test_analytics.py::test_highest_revenue_product PASSED             [ 35%]
-tests/test_analytics.py::test_monthly_revenue_trend PASSED               [ 38%]
-tests/test_analytics.py::test_highest_revenue_region PASSED              [ 41%]
-tests/test_analytics.py::test_month_to_month_comparison_jan_feb PASSED   [ 43%]
-tests/test_analytics.py::test_month_to_month_comparison_with_names PASSED [ 46%]
-tests/test_analytics.py::test_highest_quantity_selling_product PASSED    [ 48%]
-tests/test_analytics.py::test_category_revenue_breakdown PASSED          [ 51%]
-tests/test_analytics.py::test_sales_channel_comparison PASSED            [ 53%]
-tests/test_analytics.py::test_average_transaction_value PASSED           [ 56%]
-tests/test_analytics.py::test_discount_analysis PASSED                   [ 58%]
-tests/test_api.py::test_health_check_endpoint PASSED                     [ 61%]
-tests/test_api.py::test_dashboard_endpoint PASSED                        [ 64%]
-tests/test_api.py::test_analytics_endpoints PASSED                       [ 66%]
-tests/test_api.py::test_data_quality_endpoint PASSED                     [ 69%]
-tests/test_api.py::test_ask_valid_query PASSED                           [ 71%]
-tests/test_api.py::test_ask_empty_query_validation PASSED                [ 74%]
-tests/test_api.py::test_ask_whitespace_only_validation PASSED            [ 76%]
-tests/test_api.py::test_sql_injection_defense PASSED                     [ 79%]
-tests/test_api.py::test_suggestions_endpoint PASSED                      [ 82%]
-tests/test_data_quality.py::test_returned_status_exclusion PASSED        [ 84%]
-tests/test_data_quality.py::test_zero_quantity_handling PASSED           [ 87%]
-tests/test_data_quality.py::test_negative_quantity_handling PASSED       [ 89%]
-tests/test_data_quality.py::test_missing_unit_price_handling PASSED      [ 92%]
-tests/test_data_quality.py::test_invalid_date_parsing PASSED             [ 94%]
-tests/test_data_quality.py::test_valid_transaction_calculation PASSED    [ 97%]
-tests/test_data_quality.py::test_database_audit_record_counts PASSED     [100%]
-
-============================== 39 passed in 0.15s ==============================
+======================== 66 passed, 1 warning in 0.62s =========================
 ```
 
 ---
@@ -335,5 +300,7 @@ Try these sample natural-language queries in the assistant:
 
 For complete technical interview preparation, consult the companion documents in `docs/`:
 - **[System Architecture](docs/architecture.md):** Deep-dive architectural explanations, Mermaid diagrams, Vectorless RAG concepts, and AWS deployment readiness.
+- **[Architectural Evaluation: Multi-Agent vs. Tool Calling](docs/architecture_evaluation.md):** In-depth technical comparison of Single-Agent Tool Calling vs. Multi-Agent Orchestration (CrewAI/AutoGen).
+- **[Data Cleaning & Audit Policy](docs/data_cleaning_policy.md):** Authoritative single-source-of-truth reconciliation of 51 raw vs. 48 eligible records (realized revenue: ₹1,439,200.00).
 - **[AI Development Report](docs/ai_development_report.md):** AI tools utilized, engineering decisions, problems encountered, and debugging steps.
-- **[Interview Masterclass](docs/interview_prep.md):** 40+ technical interview Q&As, candidate demonstration script, and live-coding modification walkthroughs.
+- **[Interview Masterclass](docs/interview_prep.md):** 50+ technical interview Q&As, candidate demonstration script, and live-coding modification walkthroughs.

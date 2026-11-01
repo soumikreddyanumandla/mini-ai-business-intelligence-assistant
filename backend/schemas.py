@@ -33,6 +33,14 @@ class QueryRequest(BaseModel):
         description="The natural language question asked by the business user.",
         examples=["Which product generated the highest revenue?"]
     )
+    session_id: Optional[str] = Field(
+        default="default",
+        description="Conversation session ID for multi-turn conversational tracking."
+    )
+    conversation_history: Optional[List[Dict[str, Any]]] = Field(
+        default_factory=list,
+        description="Recent conversation turns for contextual grounding."
+    )
 
     @field_validator("question")
     @classmethod
@@ -92,6 +100,8 @@ class QueryResponse(BaseModel):
     )
     data_quality_notes: List[str] = Field(default_factory=list)
     execution_time_ms: float = 0.0
+    session_id: Optional[str] = "default"
+    resolved_context: Optional[str] = None
 
 
 class DashboardMetrics(BaseModel):
@@ -141,7 +151,38 @@ class SuggestionItem(BaseModel):
 
 
 class LLMConfigRequest(BaseModel):
-    """Payload to configure or update the LLM provider key dynamically."""
+    """Payload to configure or update the LLM provider key dynamically (Admin only)."""
     provider: str = Field(default="gemini", description="LLM provider: 'gemini' or 'openai'")
     api_key: str = Field(..., description="API key string")
-    model: Optional[str] = Field(default="gemini-1.5-flash", description="Model name")
+    model: Optional[str] = Field(default="gemini-flash-lite-latest", description="Model name")
+
+
+class LLMStatusResponse(BaseModel):
+    """Safe public LLM status summary visible to all authenticated roles (never exposes key)."""
+    provider: str
+    model: str
+    is_key_configured: bool
+    status: str = Field(..., description="'verified', 'not_configured', or 'temporarily_unavailable'")
+    status_description: str
+    fallback_active: bool
+    last_verified_at: Optional[str] = None
+
+
+class AdminLLMConfigResponse(BaseModel):
+    """Privileged LLM configuration response for Admin role with masked key preview."""
+    success: bool = True
+    provider: str
+    model: str
+    is_key_configured: bool
+    masked_key: Optional[str] = None
+    status: str
+    status_description: str
+    fallback_active: bool
+    message: Optional[str] = None
+
+
+class LLMOutageSimRequest(BaseModel):
+    """Optional payload to toggle simulated LLM outage."""
+    enabled: bool = True
+    reason: Optional[str] = "Simulated Gemini API Timeout (504 Gateway Timeout)"
+
