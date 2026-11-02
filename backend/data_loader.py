@@ -115,10 +115,6 @@ def load_and_sync_csv_to_db(
                 "excluded_records": [],
             }
 
-        if replace_existing:
-            db.query(SalesTransaction).delete()
-            db.commit()
-
         # Track transactions to prevent duplicate primary keys within the same CSV
         seen_tids = set()
         transactions_to_insert: List[SalesTransaction] = []
@@ -127,6 +123,7 @@ def load_and_sync_csv_to_db(
         excluded_count = 0
         duplicate_count = 0
 
+        # Phase 1: In-memory validation of all records before touching database
         for row in raw_rows:
             val_res: RecordValidationResult = clean_and_validate_record(row)
             
@@ -172,8 +169,6 @@ def load_and_sync_csv_to_db(
             )
             transactions_to_insert.append(txn)
 
-        db.bulk_save_objects(transactions_to_insert)
-
         total_records = len(transactions_to_insert)
         cleanliness_rate = (
             round((eligible_count / total_records) * 100, 2) if total_records > 0 else 0.0
@@ -190,6 +185,14 @@ def load_and_sync_csv_to_db(
                 "excluded_count": excluded_count,
             }),
         )
+
+        # Phase 2: Atomic Database Synchronization
+        # Deletion of old records and insertion of new records happen in one atomic commit.
+        # If any failure occurs, rollback preserves existing database data completely.
+        if replace_existing:
+            db.query(SalesTransaction).delete()
+
+        db.bulk_save_objects(transactions_to_insert)
         db.add(log_entry)
         db.commit()
 

@@ -54,6 +54,8 @@ class SalesTransaction(Base):
         Index("idx_eligible_status_date", "is_eligible", "order_date"),
         Index("idx_eligible_product", "is_eligible", "product"),
         Index("idx_eligible_region", "is_eligible", "region"),
+        Index("idx_eligible_category", "is_eligible", "category"),
+        Index("idx_eligible_channel", "is_eligible", "sales_channel"),
     )
 
     def to_dict(self) -> dict:

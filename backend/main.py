@@ -10,11 +10,13 @@ Serves RESTful API endpoints for the Mini AI Business Intelligence Assistant:
 """
 
 import io
+import time
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Response, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Response, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -22,6 +24,8 @@ from backend.config import settings
 from backend.database import get_db, init_db, check_db_health, SessionLocal
 from backend.models import SalesTransaction
 from backend.data_loader import load_and_sync_csv_to_db
+from backend.metrics import metrics_collector
+from backend.ai_service import sanitize_secret
 from backend.analytics import (
     get_total_revenue,
     get_highest_revenue_product,
@@ -107,6 +111,59 @@ app.add_middleware(
 
 
 # ----------------------------------------------------------------------
+# Middleware & Global Exception Handling
+# ----------------------------------------------------------------------
+
+@app.middleware("http")
+async def telemetry_middleware(request: Request, call_next):
+    """
+    Measures request execution duration, records HTTP telemetry, and adds
+    an X-Process-Time-Ms diagnostic header.
+    """
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        duration = time.time() - start_time
+        metrics_collector.record_request(request.url.path, response.status_code, duration)
+        response.headers["X-Process-Time-Ms"] = str(round(duration * 1000, 2))
+        return response
+    except Exception as exc:
+        duration = time.time() - start_time
+        metrics_collector.record_request(request.url.path, 500, duration)
+        raise exc
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Global defensive exception handler:
+    - Logs detailed stack traces and sanitized error context internally for developer troubleshooting.
+    - Strictly prevents API keys, database internals, and raw Python tracebacks from leaking to end users.
+    """
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+
+    # Sanitize any credentials from error text before logging
+    clean_err = sanitize_secret(str(exc))
+    logger.error(
+        f"[Internal Server Error] Unhandled exception on {request.method} {request.url.path}: {clean_err}",
+        exc_info=True,
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": "InternalServerError",
+            "message": "An unexpected error occurred while processing your request. Please try again later.",
+            "status_code": 500,
+        },
+    )
+
+
+# ----------------------------------------------------------------------
 # Endpoints
 # ----------------------------------------------------------------------
 
@@ -125,6 +182,48 @@ def health_check(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "fallback_active": status_info["fallback_active"],
         "version": settings.APP_VERSION,
     }
+
+
+@app.get("/api/ready", tags=["System"])
+def readiness_check(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Deployment readiness probe:
+    Verifies that SQLite database is reachable, operational, and initialized with records.
+    Returns HTTP 200 when ready to accept traffic, or HTTP 503 if degraded.
+    """
+    db_ok = check_db_health()
+    if not db_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service Not Ready: SQLite database connection is unreachable.",
+        )
+    try:
+        count = db.query(SalesTransaction).count()
+    except Exception as e:
+        logger.error(f"Readiness probe database query failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service Not Ready: Database table query failed.",
+        )
+
+    return {
+        "status": "ready",
+        "database": "connected",
+        "initialized": count > 0,
+        "total_records": count,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/metrics", tags=["System"])
+def get_system_metrics(role: str = Depends(require_admin)) -> Dict[str, Any]:
+    """
+    Telemetry and observability metrics endpoint (Admin only).
+    Reports request counts, status code breakdown, latency distributions (avg, p95, max),
+    AI service provider invocations, circuit breaker events, and in-memory cache statistics.
+    Note: Metrics are collected in-memory per process.
+    """
+    return metrics_collector.get_summary()
 
 
 @app.get("/api/llm/status", response_model=LLMStatusResponse, tags=["System"])
@@ -522,7 +621,7 @@ def get_suggested_questions() -> List[SuggestionItem]:
 
 
 @app.post("/api/upload", tags=["Data Management"])
-async def upload_sales_dataset(
+def upload_sales_dataset(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     role: str = Depends(require_admin),
@@ -530,6 +629,7 @@ async def upload_sales_dataset(
     """
     Allows users to upload a new or refreshed sales CSV dataset.
     Validates CSV headers, applies data cleaning rules, updates SQLite, and logs audit metrics.
+    Runs on worker threadpool to avoid blocking FastAPI's main event loop.
     Protected by Admin RBAC role.
     """
     if not file.filename.endswith(".csv"):
@@ -538,7 +638,7 @@ async def upload_sales_dataset(
             detail="Only CSV files (.csv) are accepted.",
         )
 
-    content = await file.read()
+    content = file.file.read()
     if len(content) > 10 * 1024 * 1024:  # 10 MB limit
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -552,6 +652,9 @@ async def upload_sales_dataset(
 
     try:
         summary = load_and_sync_csv_to_db(csv_path=str(temp_path), db=db, replace_existing=True)
+        # Analytics cache invalidation occurs strictly AFTER successful dataset upload
+        from backend.cache import analytics_cache
+        analytics_cache.invalidate_all()
         return {
             "success": True,
             "filename": file.filename,
@@ -581,6 +684,9 @@ def reset_to_company_dataset(
     """
     from backend.data_loader import reset_default_dataset
     summary = reset_default_dataset(db=db)
+    # Analytics cache invalidation occurs strictly AFTER successful dataset reset
+    from backend.cache import analytics_cache
+    analytics_cache.invalidate_all()
     return {
         "success": True,
         "message": "Database successfully reset to original company-provided dataset.",

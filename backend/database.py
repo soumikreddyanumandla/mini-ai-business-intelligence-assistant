@@ -7,7 +7,7 @@ and schema initialization routines.
 
 import logging
 from typing import Generator
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker, Session
 from backend.config import settings
 from backend.models import Base
@@ -23,6 +23,28 @@ engine = create_engine(
     echo=settings.DEBUG,
     pool_pre_ping=True,
 )
+
+
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """
+    Configures SQLite for high-concurrency production workloads:
+    - WAL mode: Enables concurrent reads while writing.
+    - busy_timeout=5000: Waits up to 5000ms on locks to prevent database locked errors.
+    - synchronous=NORMAL: Fast and safe durability under WAL.
+    """
+    if settings.DATABASE_URL.startswith("sqlite"):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        except Exception as e:
+            logger.warning(f"Could not apply SQLite concurrency pragmas: {e}")
+        finally:
+            cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -48,8 +70,12 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
+
 
 
 def check_db_health() -> bool:

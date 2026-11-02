@@ -13,8 +13,10 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import func, desc, asc, case, text
 from sqlalchemy.orm import Session
 from backend.models import SalesTransaction
+from backend.cache import cached_query
 
 
+@cached_query("analytics", ttl=60.0)
 def get_total_revenue(db: Session) -> Dict[str, Any]:
     """
     Mandatory Question A: Total Revenue
@@ -70,6 +72,7 @@ def get_total_revenue(db: Session) -> Dict[str, Any]:
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_highest_revenue_product(db: Session, limit: int = 1) -> Dict[str, Any]:
     """
     Mandatory Question B: Highest-revenue product.
@@ -115,6 +118,7 @@ def get_highest_revenue_product(db: Session, limit: int = 1) -> Dict[str, Any]:
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_monthly_revenue_trend(
     db: Session,
     region: Optional[str] = None,
@@ -189,6 +193,7 @@ def get_monthly_revenue_trend(
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_highest_revenue_region(db: Session, limit: int = 1) -> Dict[str, Any]:
     """
     Mandatory Question D: Highest-revenue region.
@@ -263,6 +268,7 @@ def normalize_month_input(month_input: str) -> Optional[str]:
     return None
 
 
+@cached_query("analytics", ttl=60.0)
 def compare_two_months(db: Session, month_1: str, month_2: str) -> Dict[str, Any]:
     """
     Mandatory Question E: Comparison between two months.
@@ -408,6 +414,7 @@ def get_lowest_quantity_product(db: Session, limit: int = 1) -> Dict[str, Any]:
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_category_revenue_breakdown(db: Session) -> Dict[str, Any]:
     """Additional Tool 3: Category-wise revenue and contribution share."""
     rows = (
@@ -444,6 +451,7 @@ def get_category_revenue_breakdown(db: Session) -> Dict[str, Any]:
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_sales_channel_comparison(db: Session) -> Dict[str, Any]:
     """Additional Tool 4: Comparison between Online and Retail sales channels."""
     rows = (
@@ -739,12 +747,15 @@ def get_top_n_products_by_revenue(db: Session, n: int = 5) -> Dict[str, Any]:
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_dashboard_summary_metrics(db: Session) -> Dict[str, Any]:
     """Comprehensive summary metrics for executive dashboard cards."""
     total_res = get_total_revenue(db)
-    prods = db.query(func.count(func.distinct(SalesTransaction.product))).scalar() or 0
-    regs = db.query(func.count(func.distinct(SalesTransaction.region))).scalar() or 0
-    cats = db.query(func.count(func.distinct(SalesTransaction.category))).scalar() or 0
+    counts = db.query(
+        func.count(func.distinct(SalesTransaction.product)).label("prods"),
+        func.count(func.distinct(SalesTransaction.region)).label("regs"),
+        func.count(func.distinct(SalesTransaction.category)).label("cats"),
+    ).one()
 
     return {
         "total_gross_revenue": total_res["total_gross_revenue"],
@@ -754,28 +765,34 @@ def get_dashboard_summary_metrics(db: Session) -> Dict[str, Any]:
         "total_transactions": total_res["total_records"],
         "eligible_transactions": total_res["eligible_transaction_count"],
         "excluded_transactions": total_res["excluded_record_count"],
-        "unique_products": prods,
-        "unique_regions": regs,
-        "unique_categories": cats,
+        "unique_products": counts.prods or 0,
+        "unique_regions": counts.regs or 0,
+        "unique_categories": counts.cats or 0,
         "average_order_value": total_res["average_order_value"],
         "currency": "INR",
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_data_quality_summary(db: Session) -> Dict[str, Any]:
     """Summary of dataset quality, record eligibility, and audit counts."""
-    total_records = db.query(SalesTransaction).count()
-    eligible_count = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == True).count()
-    excluded_rows = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == False).all()
+    counts = db.query(
+        func.count(SalesTransaction.transaction_id).label("total"),
+        func.sum(case((SalesTransaction.is_eligible == True, 1), else_=0)).label("eligible"),
+    ).one()
+    total_records = counts.total or 0
+    eligible_count = int(counts.eligible or 0)
+    excluded_records = total_records - eligible_count
     cleanliness = round((eligible_count / total_records) * 100, 2) if total_records > 0 else 0.0
     return {
         "total_records": total_records,
         "eligible_records": eligible_count,
-        "excluded_records": len(excluded_rows),
+        "excluded_records": excluded_records,
         "cleanliness_percentage": cleanliness,
     }
 
 
+@cached_query("analytics", ttl=60.0)
 def get_data_quality_audit(db: Session) -> Dict[str, Any]:
     """
     Detailed audit of data quality issues, excluded records, and cleanliness rate.

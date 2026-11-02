@@ -27,6 +27,12 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.exceptions import LLMProviderError, ToolExecutionError
 from backend.intent_router import fallback_classify_intent
+from backend.circuit_breaker import (
+    CircuitBreaker,
+    CircuitState,
+    execute_with_resilience,
+    CircuitBreakerOpenException,
+)
 from backend.schemas import (
     IntentInterpretation,
     QuestionCategory,
@@ -34,6 +40,7 @@ from backend.schemas import (
 )
 from backend.tool_registry import registry
 from backend.conversation import conversation_manager
+from backend.metrics import metrics_collector
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +104,13 @@ class AIService:
         self._simulation_active: bool = False
         self._simulated_reason: Optional[str] = None
         self.openai_client = None
+        self.circuit_breaker = CircuitBreaker(
+            name="GeminiCircuitBreaker",
+            failure_threshold=3,
+            recovery_timeout=30.0,
+            success_threshold=1,
+            on_trip=metrics_collector.record_circuit_trip,
+        )
         self._init_clients()
 
     def _init_clients(self) -> None:
@@ -122,11 +136,13 @@ class AIService:
                 self.gemini_status = "verified"
                 self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
                 self.last_verified_at = datetime.now().isoformat()
+                self.circuit_breaker.reset()
                 logger.info(f"Centralized Google Gemini modern SDK client verified with model {m_name}.")
             except Exception as e:
                 err_clean = sanitize_secret(str(e))
                 self.gemini_client = client if 'client' in locals() else None
                 self.gemini_is_genai_sdk = True
+                self.circuit_breaker.record_failure(e)
                 if "429" in err_clean or "quota" in err_clean.lower():
                     self.gemini_status = "temporarily_unavailable"
                     self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
@@ -181,6 +197,7 @@ class AIService:
                 self.gemini_status = "verified"
                 self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
                 self.last_verified_at = datetime.now().isoformat()
+                self.circuit_breaker.reset()
                 
                 settings.LLM_PROVIDER = "gemini"
                 settings.GEMINI_API_KEY = clean_key
@@ -189,6 +206,7 @@ class AIService:
                 return True, f"Successfully verified and saved Gemini API configuration (Model: {m_name})!"
             except Exception as e:
                 err_clean = sanitize_secret(str(e))
+                self.circuit_breaker.record_failure(e)
                 if "429" in err_clean or "quota" in err_clean.lower():
                     self.gemini_status = "temporarily_unavailable"
                     self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
@@ -208,6 +226,7 @@ class AIService:
                 m_name = model or settings.OPENAI_MODEL or "gpt-4o-mini"
                 client.models.list()
                 self.openai_client = client
+                self.circuit_breaker.reset()
                 settings.LLM_PROVIDER = "openai"
                 settings.OPENAI_API_KEY = clean_key
                 settings.OPENAI_MODEL = m_name
@@ -215,6 +234,7 @@ class AIService:
                 return True, f"Successfully connected to OpenAI API with model {m_name}!"
             except Exception as e:
                 err_clean = sanitize_secret(str(e))
+                self.circuit_breaker.record_failure(e)
                 logger.error(f"Failed to verify OpenAI API key: {err_clean}")
                 return False, f"Failed to connect to OpenAI API: {err_clean}"
 
@@ -228,6 +248,7 @@ class AIService:
             self.gemini_status = "not_configured"
             self.gemini_status_detail = "Gemini is not configured. Deterministic fallback active."
             settings.GEMINI_API_KEY = None
+            self.circuit_breaker.reset()
             logger.info("Admin cleared centralized Gemini API key from backend.")
             return True, "Gemini API key cleared successfully from backend configuration."
         return False, f"Unsupported provider: '{provider}'."
@@ -243,6 +264,7 @@ class AIService:
     def get_llm_status(self) -> Dict[str, Any]:
         """Returns comprehensive sanitized LLM status information (safe for all users)."""
         is_configured = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
+        cb_status = self.circuit_breaker.get_status() if hasattr(self, "circuit_breaker") else {}
         return {
             "provider": settings.LLM_PROVIDER,
             "model": settings.GEMINI_MODEL if settings.LLM_PROVIDER == "gemini" else settings.OPENAI_MODEL,
@@ -251,6 +273,7 @@ class AIService:
             "status_description": self.gemini_status_detail,
             "fallback_active": not self.is_llm_available(),
             "last_verified_at": self.last_verified_at,
+            "circuit_breaker": cb_status,
         }
 
     def simulate_outage(self, enabled: bool = True, reason: str = "Simulated Gemini API Timeout (504 Gateway Timeout)") -> None:
@@ -261,10 +284,14 @@ class AIService:
         self._simulation_active = enabled
         self._simulated_reason = reason if enabled else None
         if enabled:
+            if hasattr(self, "circuit_breaker"):
+                self.circuit_breaker.trip(reason=reason)
             self.gemini_status = "temporarily_unavailable"
             self.gemini_status_detail = f"Gemini Temporarily Unavailable: {reason}. Deterministic fallback active."
             logger.warning(f"Simulated Gemini outage activated: {reason}")
         else:
+            if hasattr(self, "circuit_breaker"):
+                self.circuit_breaker.reset()
             self.verify_live_connection()
             logger.info("Simulated Gemini outage deactivated. Live connection re-verified.")
 
@@ -301,11 +328,15 @@ class AIService:
             settings.LLM_PROVIDER = "gemini"
             self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
             self.last_verified_at = datetime.now().isoformat()
+            if hasattr(self, "circuit_breaker"):
+                self.circuit_breaker.reset()
             logger.info(f"Live Gemini connectivity re-verified: {self.gemini_status_detail}")
             return True, f"Gemini verified operational with model {m_name}."
         except Exception as e:
             err_clean = sanitize_secret(str(e))
             self.gemini_status = "temporarily_unavailable"
+            if hasattr(self, "circuit_breaker"):
+                self.circuit_breaker.record_failure(e)
             if "429" in err_clean or "quota" in err_clean.lower():
                 self.gemini_status_detail = "Gemini Quota Exceeded (Free Tier Rate Limit). Deterministic fallback active."
             else:
@@ -313,8 +344,10 @@ class AIService:
             return False, self.gemini_status_detail
 
     def is_llm_available(self) -> bool:
-        """Returns True only if an external LLM client is configured AND verified operational."""
+        """Returns True only if an external LLM client is configured AND verified operational AND circuit breaker not OPEN."""
         if getattr(self, "_simulation_active", False):
+            return False
+        if hasattr(self, "circuit_breaker") and self.circuit_breaker.state == CircuitState.OPEN:
             return False
         if settings.LLM_PROVIDER == "gemini":
             return bool(self.gemini_client and self.gemini_status == "verified")
@@ -326,6 +359,7 @@ class AIService:
         """
         Interprets natural language question into structured IntentInterpretation.
         Returns (IntentInterpretation, ai_mode).
+        Guarded by thread-safe Circuit Breaker and resilient retries.
         """
         # If no LLM credentials configured or temporarily unavailable, use deterministic intent router
         if not self.is_llm_available():
@@ -338,41 +372,54 @@ class AIService:
 
         try:
             if settings.LLM_PROVIDER == "gemini" and self.gemini_client:
-                if getattr(self, "gemini_is_genai_sdk", False):
-                    from google.genai import types
-                    config = types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.0,
-                    )
-                    response = self.gemini_client.models.generate_content(
-                        model=settings.GEMINI_MODEL,
-                        contents=prompt,
-                        config=config,
-                    )
-                    raw_text = response.text.strip()
-                    parsed = self._parse_json_response(raw_text)
-                    return IntentInterpretation(**parsed), "gemini"
-                else:
-                    model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
-                    response = model.generate_content(prompt, request_options={"timeout": 15.0})
-                    raw_text = response.text.strip()
-                    parsed = self._parse_json_response(raw_text)
-                    return IntentInterpretation(**parsed), "gemini"
+                def _invoke_gemini():
+                    if getattr(self, "gemini_is_genai_sdk", False):
+                        from google.genai import types
+                        config = types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.0,
+                        )
+                        response = self.gemini_client.models.generate_content(
+                            model=settings.GEMINI_MODEL,
+                            contents=prompt,
+                            config=config,
+                        )
+                        raw_text = response.text.strip()
+                        return self._parse_json_response(raw_text)
+                    else:
+                        model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
+                        response = model.generate_content(prompt, request_options={"timeout": 15.0})
+                        raw_text = response.text.strip()
+                        return self._parse_json_response(raw_text)
+
+                parsed = execute_with_resilience(self.circuit_breaker, _invoke_gemini)
+                metrics_collector.record_llm_call("gemini", success=True, is_fallback=False)
+                return IntentInterpretation(**parsed), "gemini"
 
             elif settings.LLM_PROVIDER == "openai" and self.openai_client:
-                response = self.openai_client.chat.completions.create(
-                    model=settings.OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INTENT_PROMPT.format(tool_catalog=catalog)},
-                        {"role": "user", "content": question},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.0,
-                )
-                raw_text = response.choices[0].message.content.strip()
-                parsed = json.loads(raw_text)
+                def _invoke_openai():
+                    response = self.openai_client.chat.completions.create(
+                        model=settings.OPENAI_MODEL,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_INTENT_PROMPT.format(tool_catalog=catalog)},
+                            {"role": "user", "content": question},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.0,
+                    )
+                    raw_text = response.choices[0].message.content.strip()
+                    return json.loads(raw_text)
+
+                parsed = execute_with_resilience(self.circuit_breaker, _invoke_openai)
+                metrics_collector.record_llm_call("openai", success=True, is_fallback=False)
                 return IntentInterpretation(**parsed), "openai"
 
+        except CircuitBreakerOpenException as cbe:
+            logger.warning(f"Circuit breaker active: {cbe}. Reverting immediately to deterministic fallback.")
+            self.gemini_status = "temporarily_unavailable"
+            self.gemini_status_detail = f"Gemini Circuit Breaker OPEN ({self.circuit_breaker.state.value}). Deterministic fallback active."
+            metrics_collector.record_llm_call(settings.LLM_PROVIDER, success=False, is_fallback=True)
+            return fallback_classify_intent(question), "fallback_rule"
         except Exception as e:
             err_clean = sanitize_secret(str(e))
             if "429" in err_clean or "quota" in err_clean.lower():
@@ -382,10 +429,12 @@ class AIService:
                 self.gemini_status = "temporarily_unavailable"
                 self.gemini_status_detail = f"Gemini Temporarily Unavailable: {err_clean[:80]}. Deterministic fallback active."
             logger.error(f"External LLM API call failed ({err_clean}). Reverting to fallback intent classifier.")
+            metrics_collector.record_llm_call(settings.LLM_PROVIDER, success=False, is_fallback=True)
             if settings.ALLOW_FALLBACK_ON_ERROR:
                 return fallback_classify_intent(question), "fallback_rule"
             raise LLMProviderError(f"LLM API failure: {err_clean}")
 
+        metrics_collector.record_llm_call(settings.LLM_PROVIDER, success=False, is_fallback=True)
         return fallback_classify_intent(question), "fallback_rule"
 
     def generate_grounded_explanation(
@@ -393,6 +442,7 @@ class AIService:
     ) -> str:
         """
         Generates grounded business explanation based on actual retrieved database numbers.
+        Guarded by thread-safe Circuit Breaker.
         """
         if ai_mode in ["gemini", "openai"] and self.is_llm_available():
             prompt = (
@@ -404,26 +454,33 @@ class AIService:
             )
             try:
                 if ai_mode == "gemini" and self.gemini_client:
-                    if getattr(self, "gemini_is_genai_sdk", False):
-                        res = self.gemini_client.models.generate_content(
-                            model=settings.GEMINI_MODEL,
-                            contents=prompt,
-                        )
-                        return res.text.strip()
-                    else:
-                        model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
-                        res = model.generate_content(prompt, request_options={"timeout": 15.0})
-                        return res.text.strip()
+                    def _call_gemini_exp():
+                        if getattr(self, "gemini_is_genai_sdk", False):
+                            res = self.gemini_client.models.generate_content(
+                                model=settings.GEMINI_MODEL,
+                                contents=prompt,
+                            )
+                            return res.text.strip()
+                        else:
+                            model = self.gemini_client.GenerativeModel(settings.GEMINI_MODEL)
+                            res = model.generate_content(prompt, request_options={"timeout": 15.0})
+                            return res.text.strip()
+
+                    return execute_with_resilience(self.circuit_breaker, _call_gemini_exp)
+
                 elif ai_mode == "openai" and self.openai_client:
-                    res = self.openai_client.chat.completions.create(
-                        model=settings.OPENAI_MODEL,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.2,
-                        timeout=15.0,
-                    )
-                    return res.choices[0].message.content.strip()
+                    def _call_openai_exp():
+                        res = self.openai_client.chat.completions.create(
+                            model=settings.OPENAI_MODEL,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.2,
+                            timeout=15.0,
+                        )
+                        return res.choices[0].message.content.strip()
+
+                    return execute_with_resilience(self.circuit_breaker, _call_openai_exp)
             except Exception as e:
-                logger.warning(f"LLM explanation generation failed ({e}); using template fallback.")
+                logger.warning(f"LLM explanation generation failed ({sanitize_secret(str(e))}); using deterministic explanation.")
 
         # Deterministic Grounded Narrative Generator
         return self._build_deterministic_explanation(tool_name, metrics)

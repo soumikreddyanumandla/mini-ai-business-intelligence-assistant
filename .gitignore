@@ -33,7 +33,11 @@ venv/
 # SQLite Database Files
 *.db
 *.sqlite3
+*.db-wal
+*.db-shm
 data/*.db
+data/*.db-wal
+data/*.db-shm
 data/uploaded_*.csv
 
 # Testing & Coverage

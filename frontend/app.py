@@ -224,6 +224,23 @@ with st.sidebar:
                         st.warning(res.get("message", "Re-verification completed."))
                     st.rerun()
 
+        with st.expander("📈 Production Telemetry & Cache (Admin)", expanded=False):
+            telemetry = fetch_api("/api/metrics")
+            if "error" in telemetry:
+                st.caption(f"Telemetry unavailable: {telemetry['error']}")
+            else:
+                http_m = telemetry.get("http_metrics", {})
+                cache_m = telemetry.get("cache_metrics", {})
+                ai_m = telemetry.get("ai_service_metrics", {})
+
+                st.markdown(f"**Process Uptime:** `{telemetry.get('process_uptime_seconds', 0)}s`")
+                st.markdown(f"**Total HTTP Requests:** `{http_m.get('total_requests', 0)}`")
+                st.markdown(f"**Avg / P95 Latency:** `{http_m.get('average_latency_ms', 0)}ms` / `{http_m.get('p95_latency_ms', 0)}ms`")
+                st.markdown(f"**Cache Hit Ratio:** `{cache_m.get('hit_ratio_percent', 0)}%` ({cache_m.get('hits', 0)} hits / {cache_m.get('misses', 0)} misses)")
+                st.markdown(f"**Active Cache Entries:** `{cache_m.get('active_entries', 0)}`")
+                st.markdown(f"**AI Queries:** `{ai_m.get('total_llm_queries', 0)}` (Fallbacks: `{ai_m.get('fallback_queries', 0)}`)")
+                st.caption("ℹ️ In-memory telemetry recorded per worker process.")
+
     st.markdown("---")
     st.markdown("#### 🔄 Dataset Management")
     if st.button("Reset to Original Company Dataset", use_container_width=True):
