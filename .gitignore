@@ -26,12 +26,21 @@ wheels/
 # Virtual Environment
 venv/
 .venv/
+env/
 
-# Environment Variables
+# Environment Variables & Secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*credentials*
+*secret*
 
-# SQLite Database Files
+# SQLite Database Files & Uploads
 *.db
+*.sqlite
 *.sqlite3
 *.db-wal
 *.db-shm
@@ -40,19 +49,29 @@ data/*.db-wal
 data/*.db-shm
 data/uploaded_*.csv
 
+# Confidential Assessment Documents & Temporary Storage
+*.docx
+*.pdf
+scratch/
+.tempmediaStorage/
+*.log
+
+# AI Agents & IDE
+.agents/
+.claude/
+.gemini/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
 # Testing & Coverage
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
-
-# IDE & OS
-.DS_Store
-.idea/
-.vscode/
-*.swp
-*.swo
 
 # Streamlit
 .streamlit/
