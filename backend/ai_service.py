@@ -43,6 +43,7 @@ from backend.conversation import conversation_manager
 from backend.metrics import metrics_collector
 from backend.security import inspect_prompt_safety, log_security_event
 from backend.models import SalesTransaction
+from backend.orchestrator import orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -806,6 +807,47 @@ class AIService:
             )
 
         # Category 1: Supported Questions
+        # Check if query requires multi-step analytical reasoning and orchestration
+        plan = orchestrator.create_plan(
+            resolved_question,
+            is_llm_available=self.is_llm_available(),
+            client=self.gemini_client,
+        )
+        if plan.is_multi_step and len(plan.steps) > 1:
+            exec_res = orchestrator.execute_plan(
+                plan,
+                db,
+                session_id=sid,
+                is_llm_available=self.is_llm_available(),
+                client=self.gemini_client,
+            )
+            session = conversation_manager.get_or_create_session(sid)
+            session.add_turn(question, exec_res.answer, "multi_step_orchestrator", exec_res.combined_metrics)
+
+            return QueryResponse(
+                success=(exec_res.status in ["SUCCESS", "PARTIAL_SUCCESS"]),
+                question=question,
+                intent=f"multi_step_plan:{'_'.join(s.tool_name for s in plan.steps)}",
+                category=int(QuestionCategory.SUPPORTED),
+                category_name="Multi-Step Analytical Plan",
+                answer=exec_res.answer,
+                explanation=exec_res.explanation,
+                metrics=exec_res.combined_metrics,
+                supporting_data=exec_res.supporting_data,
+                chart_type=exec_res.chart_type,
+                ai_mode="gemini_orchestrator" if (self.is_llm_available() and plan.reasoning) else "deterministic_orchestrator",
+                data_quality_notes=[
+                    "Multi-step analysis executed with deterministic SQL tool bounds.",
+                    "Intermediate metrics validated against database ground truth.",
+                ],
+                execution_time_ms=exec_res.total_execution_time_ms,
+                session_id=sid,
+                resolved_context=resolved_question if has_resolved_context else None,
+                provenance=exec_res.provenance,
+                is_multi_step=True,
+                execution_plan=plan.model_dump(),
+            )
+
         tool_name = interpretation.intent
         tool = registry.get(tool_name)
         if not tool:

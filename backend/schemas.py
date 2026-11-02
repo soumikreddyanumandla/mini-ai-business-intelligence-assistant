@@ -106,6 +106,14 @@ class QueryResponse(BaseModel):
         default=None,
         description="Data provenance metadata describing executed analytical operation, entity, and eligible row count."
     )
+    is_multi_step: bool = Field(
+        default=False,
+        description="True if query required multi-step analytical reasoning and orchestration."
+    )
+    execution_plan: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured execution plan detail for multi-step queries."
+    )
 
 
 class DashboardMetrics(BaseModel):

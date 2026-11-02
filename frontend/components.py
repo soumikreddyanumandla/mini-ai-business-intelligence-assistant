@@ -199,7 +199,10 @@ def render_query_result_box(response: Dict[str, Any]):
             else:
                 badges.append(":red-background[Category 4: Unrelated]")
 
-            if ai_mode == "gemini":
+            if response.get("is_multi_step"):
+                badges.append(":violet-background[🧩 Multi-Step Orchestration]")
+
+            if ai_mode == "gemini" or ai_mode == "gemini_orchestrator":
                 badges.append(":blue-background[🤖 Gemini LLM]")
             elif ai_mode == "openai":
                 badges.append(":blue-background[🤖 OpenAI LLM]")
@@ -214,7 +217,19 @@ def render_query_result_box(response: Dict[str, Any]):
         with col_meta:
             st.caption(f"⚡ {exec_time:.1f}ms")
 
-        # 2. Context Antecedent Note (if multi-turn follow-up)
+        # 2. Multi-Step Execution Plan Card (if multi-step query)
+        if response.get("is_multi_step") and response.get("execution_plan"):
+            plan_data = response.get("execution_plan", {})
+            steps = plan_data.get("steps", [])
+            with st.expander(f"🧩 Multi-Step Analytical Plan ({len(steps)} Steps Planned & Verified)", expanded=False):
+                if plan_data.get("reasoning"):
+                    st.caption(f"**Planner Strategy:** {plan_data['reasoning']}")
+                for step in steps:
+                    deps = step.get("depends_on", [])
+                    deps_str = f"Depends on Step {deps}" if deps else "Independent (Parallel Execution)"
+                    st.markdown(f"- **Step {step.get('step_id')}:** `{step.get('tool_name')}` — *{step.get('description', '')}* `[{deps_str}]`")
+
+        # 3. Context Antecedent Note (if multi-turn follow-up)
         if resolved_context:
             st.info(f"🔗 **Context Antecedent Resolved:** *\"{resolved_context}\"*")
 

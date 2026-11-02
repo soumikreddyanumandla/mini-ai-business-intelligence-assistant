@@ -336,6 +336,8 @@ with tab_assistant:
         ("📉 Which product generated the lowest revenue?", "Which product generated the lowest revenue?"),
         ("⚖️ Compare South and North regions.", "Compare South and North."),
         ("💬 Follow-up: Show its monthly trend.", "Show its monthly trend."),
+        ("🧩 Multi-Step: Revenue & top product share", "What is our total revenue, and what percentage did our top product contribute?"),
+        ("🧩 Multi-Step: Top product & top region", "What is our top product and top region?"),
         ("❓ Compare revenue (Ambiguous Query)", "Compare revenue"),
         ("🚫 What is our net profit? (Unsupported Query)", "What is our net profit margin?"),
     ]
