@@ -30,6 +30,7 @@ from reportlab.platypus import (
 
 from backend import analytics
 from backend.models import SalesTransaction
+from backend.security import sanitize_csv_cell_for_export
 
 
 def generate_executive_pdf_report(db: Session) -> bytes:
@@ -324,7 +325,7 @@ def generate_transactions_csv_export(db: Session, filter_eligible: Optional[bool
     transactions = query.order_by(SalesTransaction.transaction_id.asc()).all()
     for t in transactions:
         net_rev = (t.quantity * t.unit_price - t.discount_amount) if t.is_eligible else 0.0
-        writer.writerow([
+        row = [
             t.transaction_id,
             t.order_date.isoformat() if t.order_date else "",
             t.product,
@@ -338,7 +339,8 @@ def generate_transactions_csv_export(db: Session, filter_eligible: Optional[bool
             t.status,
             "YES" if t.is_eligible else "NO",
             t.exclusion_reason or "",
-        ])
+        ]
+        writer.writerow([sanitize_csv_cell_for_export(val) for val in row])
 
     return output.getvalue()
 
@@ -347,6 +349,7 @@ def generate_analytics_summary_csv(db: Session, summary_type: str = "products") 
     """
     Generates CSV export for specific aggregated analytical summaries.
     Options: 'products', 'regions', 'monthly', 'channels'
+    All cell values are sanitized against CSV formula injection.
     """
     output = io.StringIO()
     writer = csv.writer(output)
@@ -355,10 +358,11 @@ def generate_analytics_summary_csv(db: Session, summary_type: str = "products") 
         writer.writerow(["Rank", "Product", "Units_Sold", "Order_Count", "Net_Revenue", "Gross_Revenue"])
         data = analytics.get_highest_revenue_product(db)
         for p in data["ranking"]:
-            writer.writerow([
+            row = [
                 p["rank"], p["product"], p["quantity_sold"], p["order_count"],
                 f"{p['net_revenue']:.2f}", f"{p['gross_revenue']:.2f}"
-            ])
+            ]
+            writer.writerow([sanitize_csv_cell_for_export(v) for v in row])
 
     elif summary_type == "regions":
         writer.writerow(["Rank", "Region", "Net_Revenue", "Revenue_Share_Pct", "Units_Sold", "Order_Count", "AOV"])
@@ -366,10 +370,11 @@ def generate_analytics_summary_csv(db: Session, summary_type: str = "products") 
         for r in data["regions"]:
             aov = round(r["net_revenue"] / r["transaction_count"], 2) if r.get("transaction_count") else 0.0
             share = r.get("revenue_share_percentage", 0.0)
-            writer.writerow([
+            row = [
                 r["rank"], r["region"], f"{r['net_revenue']:.2f}", f"{share:.2f}",
                 r["quantity_sold"], r["transaction_count"], f"{aov:.2f}"
-            ])
+            ]
+            writer.writerow([sanitize_csv_cell_for_export(v) for v in row])
 
     elif summary_type == "monthly":
         writer.writerow(["Month", "Month_Name", "Net_Revenue", "Units_Sold", "Order_Count", "MoM_Growth_Pct", "AOV"])
@@ -381,10 +386,11 @@ def generate_analytics_summary_csv(db: Session, summary_type: str = "products") 
                 m_name = m["month"]
             growth_val = f"{m['growth_percentage']:.2f}" if m["growth_percentage"] is not None else ""
             aov = round(m["net_revenue"] / m["transaction_count"], 2) if m.get("transaction_count") else 0.0
-            writer.writerow([
+            row = [
                 m["month"], m_name, f"{m['net_revenue']:.2f}",
                 m["quantity_sold"], m["transaction_count"], growth_val, f"{aov:.2f}"
-            ])
+            ]
+            writer.writerow([sanitize_csv_cell_for_export(v) for v in row])
 
     elif summary_type == "channels":
         writer.writerow(["Rank", "Sales_Channel", "Net_Revenue", "Revenue_Share_Pct", "Units_Sold", "Order_Count", "AOV"])
@@ -392,9 +398,10 @@ def generate_analytics_summary_csv(db: Session, summary_type: str = "products") 
         for idx, c in enumerate(data["channels"], start=1):
             aov = round(c["net_revenue"] / c["transaction_count"], 2) if c.get("transaction_count") else 0.0
             share = c.get("revenue_share_percentage", 0.0)
-            writer.writerow([
+            row = [
                 idx, c["sales_channel"], f"{c['net_revenue']:.2f}", f"{share:.2f}",
                 c["quantity_sold"], c["transaction_count"], f"{aov:.2f}"
-            ])
+            ]
+            writer.writerow([sanitize_csv_cell_for_export(v) for v in row])
 
     return output.getvalue()

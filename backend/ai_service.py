@@ -41,6 +41,7 @@ from backend.schemas import (
 from backend.tool_registry import registry
 from backend.conversation import conversation_manager
 from backend.metrics import metrics_collector
+from backend.security import inspect_prompt_safety, log_security_event
 
 logger = logging.getLogger(__name__)
 
@@ -626,11 +627,39 @@ class AIService:
     def process_query(self, question: str, db: Session, session_id: Optional[str] = "default") -> QueryResponse:
         """
         End-to-end question processing pipeline:
-        Context resolution -> Natural language intent -> Tool selection ->
+        Security pre-screen -> Context resolution -> Natural language intent -> Tool selection ->
         SQL computation -> Grounded explanation -> Conversational session update.
         """
         start_time = time.time()
         sid = (session_id or "default").strip()
+
+        # Step 0: Security & Prompt Injection Inspection
+        is_safe, threat_reason = inspect_prompt_safety(question)
+        if not is_safe:
+            exec_time = round((time.time() - start_time) * 1000, 2)
+            log_security_event(
+                event_type="PROMPT_INJECTION_BLOCKED",
+                endpoint="/api/ask",
+                severity="WARNING",
+                details=f"Query: '{question[:100]}' | Reason: {threat_reason}",
+                db=db,
+            )
+            return QueryResponse(
+                success=False,
+                question=question,
+                intent="security_violation_blocked",
+                category=int(QuestionCategory.UNRELATED),
+                category_name="Security Guardrail Violation",
+                answer="Enterprise Security Alert: Your query was flagged and blocked by the AI Safety & Prompt Injection Guardrail. System prompt overrides, delimiter injections, and adversarial jailbreaks are strictly prohibited.",
+                explanation="The query contained adversarial instruction override patterns or prompt extraction syntax.",
+                metrics={},
+                supporting_data=[],
+                chart_type="metric",
+                ai_mode="security_guardrail",
+                data_quality_notes=["Query blocked by AI prompt injection safety guardrail."],
+                execution_time_ms=exec_time,
+                session_id=sid,
+            )
 
         # Step 1: Conversational context & pronoun resolution
         resolved_question, injected_params, intent_hint = conversation_manager.resolve_context(

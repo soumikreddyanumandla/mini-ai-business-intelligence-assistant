@@ -104,3 +104,33 @@ class DataQualityLog(Base):
             "excluded_records": self.excluded_records,
             "notes": self.notes,
         }
+
+
+class SecurityAuditLog(Base):
+    """
+    Security and Governance Audit Log.
+    Tracks security-relevant actions such as login attempts, prompt injection
+    rejections, rate-limit trips, API key modifications, and dataset resets.
+    """
+    __tablename__ = "security_audit_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    event_type = Column(String(50), nullable=False, index=True)
+    user_role = Column(String(50), nullable=True)
+    client_ip = Column(String(50), nullable=True)
+    endpoint = Column(String(100), nullable=True)
+    severity = Column(String(20), nullable=False, default="INFO")
+    details = Column(Text, nullable=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "event_type": self.event_type,
+            "user_role": self.user_role,
+            "client_ip": self.client_ip,
+            "endpoint": self.endpoint,
+            "severity": self.severity,
+            "details": self.details,
+        }

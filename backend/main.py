@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 
 from backend.config import settings
 from backend.database import get_db, init_db, check_db_health, SessionLocal
-from backend.models import SalesTransaction
+from backend.models import SalesTransaction, SecurityAuditLog
+from backend.security import rate_limiter, log_security_event
 from backend.data_loader import load_and_sync_csv_to_db
 from backend.metrics import metrics_collector
 from backend.ai_service import sanitize_secret
@@ -238,17 +239,43 @@ def get_public_llm_status(role: str = Depends(require_any_authenticated)) -> LLM
 
 
 @app.post("/api/auth/login", response_model=AuthTokenResponse, tags=["Authentication & RBAC"])
-def login_user(credentials: UserCredentials) -> AuthTokenResponse:
+def login_user(
+    credentials: UserCredentials,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> AuthTokenResponse:
     """
     Authenticates users via username and password.
     Returns access token, role ('Admin', 'Analyst', 'Viewer'), and allowed permissions.
+    Logs audit events for successful and failed authentication attempts.
     """
+    client_ip = request.client.host if request.client else "127.0.0.1"
     auth_res = authenticate_user(credentials)
     if not auth_res:
+        log_security_event(
+            event_type="LOGIN_FAILED",
+            user_role="Anonymous",
+            client_ip=client_ip,
+            endpoint="/api/auth/login",
+            severity="WARNING",
+            details=f"Failed login attempt for username '{credentials.username}'.",
+            db=db,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password.",
         )
+
+    user_role = auth_res.get("role", "Unknown")
+    log_security_event(
+        event_type="LOGIN_SUCCESS",
+        user_role=user_role,
+        client_ip=client_ip,
+        endpoint="/api/auth/login",
+        severity="INFO",
+        details=f"User '{credentials.username}' authenticated successfully as '{user_role}'.",
+        db=db,
+    )
     return AuthTokenResponse(**auth_res)
 
 
@@ -333,6 +360,14 @@ def configure_llm_key(
     except Exception as e:
         logger.warning(f"Could not persist API key to .env: {e}")
 
+    log_security_event(
+        event_type="LLM_CONFIG_UPDATED",
+        user_role=role,
+        endpoint="/api/config/llm",
+        severity="INFO",
+        details=f"Provider '{payload.provider}' configured (model: {payload.model}).",
+    )
+
     status_info = ai_service.get_llm_status()
     return AdminLLMConfigResponse(
         success=True,
@@ -372,6 +407,14 @@ def clear_llm_key(role: str = Depends(require_admin)) -> AdminLLMConfigResponse:
                 f.writelines(new_lines)
     except Exception as e:
         logger.warning(f"Could not update .env on key deletion: {e}")
+
+    log_security_event(
+        event_type="LLM_KEY_CLEARED",
+        user_role=role,
+        endpoint="/api/config/llm",
+        severity="WARNING",
+        details="Centralized Gemini key was removed/cleared.",
+    )
 
     status_info = ai_service.get_llm_status()
     return AdminLLMConfigResponse(
@@ -435,6 +478,13 @@ def simulate_llm_outage(
             outage_reason = reason
 
     ai_service.simulate_outage(enabled=is_enabled, reason=outage_reason)
+    log_security_event(
+        event_type="OUTAGE_SIMULATION_TOGGLED",
+        user_role=role,
+        endpoint="/api/config/llm/simulate-outage",
+        severity="INFO",
+        details=f"Simulation active={is_enabled}, reason='{outage_reason}'",
+    )
     status_info = ai_service.get_llm_status()
     return AdminLLMConfigResponse(
         success=True,
@@ -452,6 +502,7 @@ def simulate_llm_outage(
 @app.post("/api/ask", response_model=QueryResponse, tags=["AI Assistant"])
 def ask_question(
     payload: QueryRequest,
+    request: Request,
     db: Session = Depends(get_db),
     role: str = Depends(require_analyst_or_admin),
 ) -> QueryResponse:
@@ -460,7 +511,27 @@ def ask_question(
     Accepts natural language business questions, recognizes intent, executes approved
     SQL analytics, generates grounded explanations, and returns interactive chart metadata.
     Protected by Analyst or Admin RBAC role.
+    Rate limited to 60 requests/minute per client IP (thread-safe sliding window).
     """
+    forwarded = request.headers.get("X-Forwarded-For")
+    client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "127.0.0.1")
+    allowed, retry_after, remaining = rate_limiter.is_allowed(client_ip, max_requests=60, window_seconds=60.0)
+    if not allowed:
+        log_security_event(
+            event_type="RATE_LIMIT_EXCEEDED",
+            user_role=role,
+            client_ip=client_ip,
+            endpoint="/api/ask",
+            severity="WARNING",
+            details=f"Rate limit exceeded on /api/ask (60 req/min). Cooldown: {retry_after}s.",
+            db=db,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded: 60 requests per minute limit reached. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(int(retry_after))},
+        )
+
     logger.info(f"Received user question: '{payload.question}' (session: {payload.session_id}, role: {role})")
     return ai_service.process_query(payload.question, db, session_id=payload.session_id)
 
@@ -623,6 +694,7 @@ def get_suggested_questions() -> List[SuggestionItem]:
 @app.post("/api/upload", tags=["Data Management"])
 def upload_sales_dataset(
     file: UploadFile = File(...),
+    request: Request = None,
     db: Session = Depends(get_db),
     role: str = Depends(require_admin),
 ) -> Dict[str, Any]:
@@ -631,7 +703,26 @@ def upload_sales_dataset(
     Validates CSV headers, applies data cleaning rules, updates SQLite, and logs audit metrics.
     Runs on worker threadpool to avoid blocking FastAPI's main event loop.
     Protected by Admin RBAC role.
+    Rate limited to 10 upload attempts per minute per client IP.
     """
+    client_ip = request.client.host if (request and request.client) else "127.0.0.1"
+    allowed, retry_after, _ = rate_limiter.is_allowed(f"upload_{client_ip}", max_requests=10, window_seconds=60.0)
+    if not allowed:
+        log_security_event(
+            event_type="RATE_LIMIT_EXCEEDED",
+            user_role=role,
+            client_ip=client_ip,
+            endpoint="/api/upload",
+            severity="WARNING",
+            details="Upload rate limit exceeded (10 uploads/min).",
+            db=db,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Upload rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(int(retry_after))},
+        )
+
     if not file.filename.endswith(".csv"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -655,6 +746,15 @@ def upload_sales_dataset(
         # Analytics cache invalidation occurs strictly AFTER successful dataset upload
         from backend.cache import analytics_cache
         analytics_cache.invalidate_all()
+        log_security_event(
+            event_type="DATASET_UPLOAD_SUCCESS",
+            user_role=role,
+            client_ip=client_ip,
+            endpoint="/api/upload",
+            severity="INFO",
+            details=f"Uploaded '{file.filename}' successfully ({summary.get('total_rows_imported', 0)} rows).",
+            db=db,
+        )
         return {
             "success": True,
             "filename": file.filename,
@@ -674,6 +774,7 @@ def upload_sales_dataset(
 
 @app.post("/api/dataset/reset", tags=["Data Management"])
 def reset_to_company_dataset(
+    request: Request = None,
     db: Session = Depends(get_db),
     role: str = Depends(require_admin),
 ) -> Dict[str, Any]:
@@ -682,15 +783,51 @@ def reset_to_company_dataset(
     Guarantees baseline consistency for testing and demonstrations.
     Protected by Admin RBAC role.
     """
+    client_ip = request.client.host if (request and request.client) else "127.0.0.1"
     from backend.data_loader import reset_default_dataset
     summary = reset_default_dataset(db=db)
     # Analytics cache invalidation occurs strictly AFTER successful dataset reset
     from backend.cache import analytics_cache
     analytics_cache.invalidate_all()
+    log_security_event(
+        event_type="DATASET_RESET",
+        user_role=role,
+        client_ip=client_ip,
+        endpoint="/api/dataset/reset",
+        severity="WARNING",
+        details="Database reset to authoritative default sales.csv dataset.",
+        db=db,
+    )
     return {
         "success": True,
         "message": "Database successfully reset to original company-provided dataset.",
         "summary": summary,
+    }
+
+
+@app.get("/api/security/audit-logs", tags=["Security & Governance"])
+def get_security_audit_logs(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    """
+    Retrieves recent security and governance audit logs.
+    Strictly protected by Admin RBAC role (Analyst and Viewer forbidden with 403).
+    """
+    safe_limit = min(max(1, limit), 1000)
+    total_count = db.query(SecurityAuditLog).count()
+    logs = (
+        db.query(SecurityAuditLog)
+        .order_by(SecurityAuditLog.timestamp.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    return {
+        "success": True,
+        "total_logs": total_count,
+        "returned_count": len(logs),
+        "logs": [l.to_dict() for l in logs],
     }
 
 
