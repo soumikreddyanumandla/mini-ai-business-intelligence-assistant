@@ -297,7 +297,6 @@ with st.sidebar:
 render_header(
     title="Mini AI Business Intelligence Assistant",
     subtitle="Ask natural-language questions about sales data and receive deterministic SQL-backed answers, charts, and grounded business insights.",
-    badge="RSG Research Private Limited • GET Selection Challenge",
 )
 
 tab_assistant, tab_dashboard, tab_deepdive, tab_forecast, tab_exports, tab_quality, tab_insights = st.tabs([
@@ -1039,16 +1038,25 @@ with tab_quality:
 
         dim_cols = st.columns(5)
         dims = dq.get("dimensions", {})
+        def _get_dim_score(d, k, default=100.0):
+            val = d.get(k, default)
+            if isinstance(val, dict):
+                return float(val.get("score", default))
+            try:
+                return float(val)
+            except Exception:
+                return default
+
         with dim_cols[0]:
-            render_metric_card("Completeness (25%)", f"{dims.get('completeness', 100):.1f}%", subtext="Null/Missing check", badge="Dimension 1")
+            render_metric_card("Completeness (25%)", f"{_get_dim_score(dims, 'completeness', 100):.1f}%", subtext="Null/Missing check", badge="Dimension 1")
         with dim_cols[1]:
-            render_metric_card("Validity (25%)", f"{dims.get('validity', 94):.1f}%", subtext="Domain constraints", badge="Dimension 2")
+            render_metric_card("Validity (25%)", f"{_get_dim_score(dims, 'validity', 94):.1f}%", subtext="Domain constraints", badge="Dimension 2")
         with dim_cols[2]:
-            render_metric_card("Consistency (20%)", f"{dims.get('consistency', 100):.1f}%", subtext="Financial formulas", badge="Dimension 3")
+            render_metric_card("Consistency (20%)", f"{_get_dim_score(dims, 'consistency', 100):.1f}%", subtext="Financial formulas", badge="Dimension 3")
         with dim_cols[3]:
-            render_metric_card("Uniqueness (15%)", f"{dims.get('uniqueness', 100):.1f}%", subtext="Duplicate detection", badge="Dimension 4")
+            render_metric_card("Uniqueness (15%)", f"{_get_dim_score(dims, 'uniqueness', 100):.1f}%", subtext="Duplicate detection", badge="Dimension 4")
         with dim_cols[4]:
-            render_metric_card("Timeliness (15%)", f"{dims.get('timeliness', 98):.1f}%", subtext="Future/Date bounds", badge="Dimension 5")
+            render_metric_card("Timeliness (15%)", f"{_get_dim_score(dims, 'timeliness', 98):.1f}%", subtext="Future/Date bounds", badge="Dimension 5")
 
         st.markdown("---")
         q_cols = st.columns(4)

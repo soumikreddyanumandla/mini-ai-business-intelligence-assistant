@@ -106,7 +106,7 @@ def inject_custom_css():
         .main-header {
             background: linear-gradient(135deg, #1E1B4B 0%, #312E81 50%, #4338CA 100%);
             border-radius: 16px;
-            padding: 26px 32px;
+            padding: 24px 30px;
             color: white;
             margin-bottom: 24px;
             box-shadow: 0 10px 25px -5px rgba(49, 46, 129, 0.2);
@@ -141,11 +141,16 @@ def inject_custom_css():
     )
 
 
-def render_header(title: str, subtitle: str, badge: str = "RSG GET Assessment"):
+def render_header(title: str, subtitle: str, badge: Optional[str] = None):
     """Renders the executive header gradient banner."""
+    badge_html = (
+        f'<span class="badge badge-purple" style="background:#4338CA; color:#E0E7FF; border:none; margin-bottom:8px;">{badge}</span>'
+        if badge
+        else ""
+    )
     html = (
         f'<div class="main-header">'
-        f'<span class="badge badge-purple" style="background:#4338CA; color:#E0E7FF; border:none; margin-bottom:8px;">{badge}</span>'
+        f'{badge_html}'
         f'<h1>{title}</h1>'
         f'<p>{subtitle}</p>'
         f'</div>'
