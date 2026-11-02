@@ -749,27 +749,93 @@ def get_top_n_products_by_revenue(db: Session, n: int = 5) -> Dict[str, Any]:
 
 
 @cached_query("analytics", ttl=60.0)
-def get_dashboard_summary_metrics(db: Session) -> Dict[str, Any]:
-    """Comprehensive summary metrics for executive dashboard cards."""
-    total_res = get_total_revenue(db)
-    counts = db.query(
+def get_dashboard_summary_metrics(
+    db: Session,
+    region: Optional[str] = None,
+    category: Optional[str] = None,
+    channel: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Comprehensive summary metrics for executive dashboard cards with optional filtering.
+    When no filters are provided, aggregates across the entire eligible dataset.
+    """
+    query = db.query(
+        func.coalesce(func.sum(SalesTransaction.gross_revenue), 0.0).label("gross_rev"),
+        func.coalesce(func.sum(SalesTransaction.net_revenue), 0.0).label("net_rev"),
+        func.coalesce(func.sum(SalesTransaction.discount_amount), 0.0).label("total_disc"),
+        func.coalesce(func.sum(SalesTransaction.quantity), 0).label("total_qty"),
+        func.count(SalesTransaction.transaction_id).label("eligible_count"),
+    ).filter(SalesTransaction.is_eligible == True)
+
+    all_query = db.query(func.count(SalesTransaction.transaction_id))
+    ex_query = db.query(func.count(SalesTransaction.transaction_id)).filter(SalesTransaction.is_eligible == False)
+
+    dist_query = db.query(
         func.count(func.distinct(SalesTransaction.product)).label("prods"),
         func.count(func.distinct(SalesTransaction.region)).label("regs"),
         func.count(func.distinct(SalesTransaction.category)).label("cats"),
-    ).one()
+    ).filter(SalesTransaction.is_eligible == True)
+
+    # Apply optional filters
+    if region and region.strip().lower() != "all":
+        reg_val = region.strip()
+        query = query.filter(SalesTransaction.region.ilike(f"%{reg_val}%"))
+        all_query = all_query.filter(SalesTransaction.region.ilike(f"%{reg_val}%"))
+        ex_query = ex_query.filter(SalesTransaction.region.ilike(f"%{reg_val}%"))
+        dist_query = dist_query.filter(SalesTransaction.region.ilike(f"%{reg_val}%"))
+
+    if category and category.strip().lower() != "all":
+        cat_val = category.strip()
+        query = query.filter(SalesTransaction.category.ilike(f"%{cat_val}%"))
+        all_query = all_query.filter(SalesTransaction.category.ilike(f"%{cat_val}%"))
+        ex_query = ex_query.filter(SalesTransaction.category.ilike(f"%{cat_val}%"))
+        dist_query = dist_query.filter(SalesTransaction.category.ilike(f"%{cat_val}%"))
+
+    if channel and channel.strip().lower() != "all":
+        chan_val = channel.strip()
+        query = query.filter(SalesTransaction.sales_channel.ilike(f"%{chan_val}%"))
+        all_query = all_query.filter(SalesTransaction.sales_channel.ilike(f"%{chan_val}%"))
+        ex_query = ex_query.filter(SalesTransaction.sales_channel.ilike(f"%{chan_val}%"))
+        dist_query = dist_query.filter(SalesTransaction.sales_channel.ilike(f"%{chan_val}%"))
+
+    if start_date:
+        query = query.filter(SalesTransaction.order_date >= start_date)
+        all_query = all_query.filter(SalesTransaction.order_date >= start_date)
+        ex_query = ex_query.filter(SalesTransaction.order_date >= start_date)
+        dist_query = dist_query.filter(SalesTransaction.order_date >= start_date)
+
+    if end_date:
+        query = query.filter(SalesTransaction.order_date <= end_date)
+        all_query = all_query.filter(SalesTransaction.order_date <= end_date)
+        ex_query = ex_query.filter(SalesTransaction.order_date <= end_date)
+        dist_query = dist_query.filter(SalesTransaction.order_date <= end_date)
+
+    stats = query.one()
+    total_records = all_query.scalar() or 0
+    excluded_records = ex_query.scalar() or 0
+    counts = dist_query.one()
+
+    gross = round(float(stats.gross_rev), 2)
+    net = round(float(stats.net_rev), 2)
+    disc = round(float(stats.total_disc), 2)
+    qty = int(stats.total_qty)
+    eligible_count = int(stats.eligible_count)
+    aov = round(net / eligible_count, 2) if eligible_count > 0 else 0.0
 
     return {
-        "total_gross_revenue": total_res["total_gross_revenue"],
-        "total_net_revenue": total_res["total_net_revenue"],
-        "total_discounts": total_res["total_discounts"],
-        "total_quantity": total_res["total_quantity_sold"],
-        "total_transactions": total_res["total_records"],
-        "eligible_transactions": total_res["eligible_transaction_count"],
-        "excluded_transactions": total_res["excluded_record_count"],
+        "total_gross_revenue": gross,
+        "total_net_revenue": net,
+        "total_discounts": disc,
+        "total_quantity": qty,
+        "total_transactions": total_records,
+        "eligible_transactions": eligible_count,
+        "excluded_transactions": excluded_records,
         "unique_products": counts.prods or 0,
         "unique_regions": counts.regs or 0,
         "unique_categories": counts.cats or 0,
-        "average_order_value": total_res["average_order_value"],
+        "average_order_value": aov,
         "currency": "INR",
     }
 

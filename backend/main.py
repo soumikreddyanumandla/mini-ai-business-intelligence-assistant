@@ -541,9 +541,23 @@ def ask_question(
 
 
 @app.get("/api/dashboard", response_model=DashboardMetrics, tags=["Dashboard"])
-def get_dashboard_kpis(db: Session = Depends(get_db)) -> DashboardMetrics:
-    """Retrieves high-level summary KPIs for executive dashboard cards."""
-    metrics = get_dashboard_summary_metrics(db)
+def get_dashboard_kpis(
+    region: Optional[str] = None,
+    category: Optional[str] = None,
+    channel: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+) -> DashboardMetrics:
+    """Retrieves high-level summary KPIs for executive dashboard cards with optional filters."""
+    metrics = get_dashboard_summary_metrics(
+        db,
+        region=region,
+        category=category,
+        channel=channel,
+        start_date=start_date,
+        end_date=end_date,
+    )
     return DashboardMetrics(**metrics)
 
 

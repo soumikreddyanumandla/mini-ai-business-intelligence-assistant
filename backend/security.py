@@ -35,14 +35,15 @@ PROMPT_INJECTION_PATTERNS = [
     r"(?i)\bignore\s+(all\s+)?(previous|prior|above|system)\s+(instructions|directions|prompts|rules)",
     r"(?i)\bdisregard\s+(all\s+)?(previous|prior|above|system)\s+(instructions|directions|prompts|rules)",
     r"(?i)\bforget\s+(all\s+)?(previous|prior|about|your)\s+(instructions|rules|identity)",
-    r"(?i)\byou\s+are\s+now\s+(unconstrained|in\s+dan\s+mode|a\s+different\s+ai|free|an\s+unrestricted)",
+    r"(?i)\byou\s+are\s+now\s+(in\s+)?(developer|unconstrained|dan|unrestricted|god|override|a\s+different\s+ai|free|an\s+unrestricted)",
     
     # System prompt extraction patterns
-    r"(?i)\b(reveal|display|output|show|print|leak|repeat)\s+(your\s+)?(system\s+prompt|initial\s+prompt|hidden\s+instructions|secret\s+instructions)",
-    r"(?i)\bwhat\s+(are\s+your|is\s+your)\s+(exact\s+)?(system\s+instructions|system\s+prompt|initial\s+instructions)",
+    r"(?i)\b(reveal|display|output|show|print|leak|repeat)\s+(your\s+)?(system\s+prompt|initial\s+prompt|internal\s+prompt|hidden\s+instructions|secret\s+instructions|confidential\s+instructions)",
+    r"(?i)\bwhat\s+(are\s+your|is\s+your)\s+(exact\s+)?(system\s+instructions|system\s+prompt|initial\s+instructions|internal\s+prompt)",
     
     # Role-play & jailbreak framing
     r"(?i)\b(dan\s+mode|jailbreak|developer\s+mode|unrestricted\s+mode|god\s+mode)\b",
+    r"(?i)\b(developer|admin|root|system)\s+(override|mode|access|privileges)\b",
     r"(?i)\bpretend\s+you\s+(have\s+no\s+rules|are\s+evil|are\s+unrestricted|are\s+unfiltered)",
     r"(?i)\bdo\s+anything\s+now\b",
     

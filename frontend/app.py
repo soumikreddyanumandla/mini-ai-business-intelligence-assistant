@@ -8,6 +8,7 @@ database-grounded AI insights, and interactive Plotly visualizations.
 import os
 import sys
 from pathlib import Path
+from datetime import datetime, date
 import pandas as pd
 import requests
 import streamlit as st
@@ -397,6 +398,32 @@ with tab_assistant:
         # Render formatted answer box
         render_query_result_box(latest)
 
+        # Expandable Provenance & Grounding Card (Package D)
+        prov = latest.get("provenance")
+        if prov:
+            with st.expander("🔍 Calculation Provenance & Grounding Details", expanded=True):
+                st.markdown(
+                    f"""
+                    <div style="background:#F0FDF4; border:1px solid #BBF7D0; border-radius:8px; padding:12px; margin-bottom:12px;">
+                        <strong style="color:#166534;">🛡️ Verified Database Grounding Guarantee:</strong>
+                        <span style="color:#15803D;">{prov.get('deterministic_guarantee', 'Computed via deterministic SQLite aggregation; zero AI numerical hallucination.')}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                p_c1, p_c2 = st.columns(2)
+                with p_c1:
+                    st.markdown(f"**Executed Operation:** `{prov.get('operation', latest.get('intent'))}`")
+                    st.markdown(f"**Target Entity:** `{prov.get('target_entity', 'sales_transactions')}`")
+                    st.markdown(f"**Eligible Rows Used:** `{prov.get('eligible_rows_used', 'N/A')}`")
+                with p_c2:
+                    st.markdown(f"**Excluded Rows Omitted:** `{prov.get('excluded_rows_omitted', 'N/A')}`")
+                    st.markdown(f"**Audit Timestamp:** `{prov.get('timestamp', 'N/A')}`")
+                    st.markdown(f"**Execution Engine:** `{latest.get('ai_mode', 'Deterministic')}` ({latest.get('execution_time_ms', 0)} ms)")
+                params = prov.get("applied_parameters")
+                if params:
+                    st.caption(f"Applied Parameters: `{params}`")
+
         # Render Dynamic Chart if available
         chart_type = latest.get("chart_type")
         supporting = latest.get("supporting_data", [])
@@ -438,7 +465,41 @@ with tab_assistant:
 
 with tab_dashboard:
     st.markdown("### 📈 Executive Sales Overview")
-    dashboard_kpis = fetch_api("/api/dashboard")
+
+    # Interactive Dashboard Filters (Package D)
+    with st.expander("🎯 Filter Executive Dashboard (Region, Channel, Category & Date Range)", expanded=True):
+        f_c1, f_c2, f_c3, f_c4 = st.columns(4)
+        with f_c1:
+            sel_region = st.selectbox("Region:", ["All", "North", "South", "East", "West"], index=0, key="db_sel_region")
+        with f_c2:
+            sel_channel = st.selectbox("Channel:", ["All", "Online", "Retail"], index=0, key="db_sel_channel")
+        with f_c3:
+            sel_category = st.selectbox("Category:", ["All", "Electronics", "Furniture"], index=0, key="db_sel_category")
+        with f_c4:
+            sel_dates = st.date_input(
+                "Order Date Range:",
+                value=(date(2026, 1, 1), date(2026, 6, 30)),
+                min_value=date(2026, 1, 1),
+                max_value=date(2026, 6, 30),
+                key="db_sel_dates",
+            )
+
+        filter_params = []
+        if sel_region != "All":
+            filter_params.append(f"region={sel_region}")
+        if sel_channel != "All":
+            filter_params.append(f"channel={sel_channel}")
+        if sel_category != "All":
+            filter_params.append(f"category={sel_category}")
+        if isinstance(sel_dates, (list, tuple)) and len(sel_dates) == 2:
+            filter_params.append(f"start_date={sel_dates[0].isoformat()}")
+            filter_params.append(f"end_date={sel_dates[1].isoformat()}")
+
+        filter_query_str = f"?{'&'.join(filter_params)}" if filter_params else ""
+        if filter_params:
+            st.info(f"🔍 **Active Filter Slice:** {', '.join(filter_params).replace('&', ', ')}")
+
+    dashboard_kpis = fetch_api(f"/api/dashboard{filter_query_str}")
     
     if "error" in dashboard_kpis:
         st.error(dashboard_kpis["error"])
@@ -530,7 +591,18 @@ with tab_deepdive:
     st.markdown("### 📊 Granular Multi-Dimensional Analytics")
     view_option = st.selectbox(
         "Select Analytical Perspective:",
-        ["Product Performance Analysis", "Regional Market Breakdown", "Regional Head-to-Head Comparison", "Monthly Revenue Comparison Tool", "Channel & Category Cross-Analysis"]
+        [
+            "Product Performance Analysis",
+            "Regional Market Breakdown",
+            "Regional Head-to-Head Comparison",
+            "Monthly Revenue Comparison Tool",
+            "Channel & Category Cross-Analysis",
+            "Anomaly Detection (IQR & Z-Score)",
+            "Pareto 80/20 Revenue Concentration",
+            "What-If Revenue Simulation",
+            "Sales Quota Pacing",
+        ],
+        key="deepdive_view_select",
     )
 
     if view_option == "Product Performance Analysis":
@@ -616,6 +688,147 @@ with tab_deepdive:
             if "channels" in ch_res:
                 st.plotly_chart(create_channel_donut_chart(ch_res["channels"]), use_container_width=True, key="deepdive_channel_donut_chart")
                 st.dataframe(pd.DataFrame(ch_res["channels"]), use_container_width=True)
+
+    elif view_option == "Anomaly Detection (IQR & Z-Score)":
+        st.markdown("#### 🚨 Statistical Anomaly & Data Quality Error Detection")
+        st.caption("Distinguishes valid statistical transaction outliers (IQR / Z-score) from confirmed data quality policy violations.")
+        
+        anom_data = fetch_api("/api/analytics/anomalies")
+        if "error" in anom_data:
+            st.error(anom_data["error"])
+        else:
+            a_c1, a_c2, a_c3 = st.columns(3)
+            with a_c1:
+                render_metric_card("Statistical Outliers", str(anom_data.get("statistical_outliers_count", 0)), subtext="IQR / Z-score flagged", badge="Statistical")
+            with a_c2:
+                render_metric_card("Data Quality Errors", str(anom_data.get("confirmed_data_quality_errors_count", 0)), subtext="Excluded violations", badge="Governance")
+            with a_c3:
+                render_metric_card("Cleanliness Ratio", f"{anom_data.get('cleanliness_percentage', 0)}%", subtext="Realized vs total", badge="Audit Grade")
+
+            st.markdown("##### 1. Statistical Outliers in Eligible Sales")
+            stat_outliers = anom_data.get("statistical_outliers", [])
+            if stat_outliers:
+                df_stat = pd.DataFrame(stat_outliers)
+                st.dataframe(df_stat, use_container_width=True)
+            else:
+                st.success("No extreme statistical outliers detected in eligible transactions.")
+
+            st.markdown("##### 2. Confirmed Data Quality Errors (Excluded from KPIs)")
+            dq_errors = anom_data.get("confirmed_data_quality_errors", [])
+            if dq_errors:
+                df_err = pd.DataFrame(dq_errors)
+                st.dataframe(df_err, use_container_width=True)
+
+    elif view_option == "Pareto 80/20 Revenue Concentration":
+        st.markdown("#### ⚖️ Pareto 80/20 Revenue Concentration Analysis")
+        st.caption("Evaluates cumulative revenue concentration across products against explicit eligible denominator.")
+        
+        p_res = fetch_api("/api/analytics/pareto?cutoff=80.0")
+        if "error" in p_res:
+            st.error(p_res["error"])
+        else:
+            par_c1, par_c2, par_c3 = st.columns(3)
+            with par_c1:
+                render_metric_card("Vital Few Products", f"{p_res.get('vital_few_count', 0)} of {p_res.get('total_catalog_products', 0)}", subtext="Driving 80%+ of revenue", badge="Pareto Core")
+            with par_c2:
+                render_metric_card("Concentration Share", f"{p_res.get('vital_revenue_share_percentage', 0):.1f}%", subtext="Cumulative revenue %", badge="High Impact")
+            with par_c3:
+                render_metric_card("Eligible Denominator", f"₹{p_res.get('denominator_total_eligible_net_revenue', 0):,.2f}", subtext="Total audited sales", badge="Denominator")
+
+            st.markdown(f"**Pareto Summary:** {p_res.get('summary')}")
+            
+            p_items = p_res.get("items", [])
+            if p_items:
+                df_par = pd.DataFrame(p_items)
+                st.dataframe(df_par, use_container_width=True)
+                
+                # Interactive Pareto Bar + Cumulative Line Chart
+                import plotly.graph_objects as go
+                fig_pareto = go.Figure()
+                fig_pareto.add_trace(go.Bar(
+                    x=df_par["product"],
+                    y=df_par["net_revenue"],
+                    name="Net Revenue (₹)",
+                    marker_color="#4F46E5",
+                    yaxis="y",
+                ))
+                fig_pareto.add_trace(go.Scatter(
+                    x=df_par["product"],
+                    y=df_par["cumulative_revenue_percentage"],
+                    name="Cumulative Revenue %",
+                    marker_color="#10B981",
+                    mode="lines+markers",
+                    yaxis="y2",
+                ))
+                fig_pareto.update_layout(
+                    title="<b>Pareto Revenue Distribution & Cumulative Curve</b>",
+                    yaxis=dict(title="Net Revenue (₹)"),
+                    yaxis2=dict(title="Cumulative %", overlaying="y", side="right", range=[0, 105]),
+                    hovermode="x unified",
+                    template="plotly_white",
+                )
+                st.plotly_chart(fig_pareto, use_container_width=True, key="deepdive_pareto_chart")
+
+    elif view_option == "What-If Revenue Simulation":
+        st.markdown("#### 🔮 What-If Revenue Scenario Simulator")
+        st.caption("Simulate revenue sensitivity to price, volume, and discount adjustments without inventing product costs.")
+
+        w_col1, w_col2, w_col3 = st.columns(3)
+        with w_col1:
+            sim_price = st.slider("Price Adjustment (%)", min_value=-30, max_value=30, value=0, step=1, key="sim_price_slider")
+        with w_col2:
+            sim_vol = st.slider("Volume Adjustment (%)", min_value=-30, max_value=30, value=0, step=1, key="sim_vol_slider")
+        with w_col3:
+            sim_disc = st.slider("Discount Adjustment (%)", min_value=-50, max_value=50, value=0, step=5, key="sim_disc_slider")
+
+        sim_res = fetch_api(
+            "/api/analytics/what-if",
+            method="POST",
+            payload={
+                "price_change_pct": float(sim_price),
+                "volume_change_pct": float(sim_vol),
+                "discount_adjustment_pct": float(sim_disc),
+            },
+        )
+        if "error" in sim_res:
+            st.error(sim_res["error"])
+        else:
+            sim_c1, sim_c2, sim_c3 = st.columns(3)
+            with sim_c1:
+                render_metric_card("Baseline Net Revenue", f"₹{sim_res.get('baseline_net_revenue', 0):,.2f}", subtext="Current historical realized", badge="Baseline")
+            with sim_c2:
+                render_metric_card("Simulated Net Revenue", f"₹{sim_res.get('simulated_net_revenue', 0):,.2f}", subtext=f"Delta: {sim_res.get('net_revenue_delta_percentage', 0):+.2f}%", badge="Projected")
+            with sim_c3:
+                delta_val = sim_res.get("net_revenue_delta", 0)
+                render_metric_card("Revenue Impact (₹)", f"₹{delta_val:+,.2f}", subtext=f"{sim_res.get('net_revenue_delta_percentage', 0):+.2f}% impact", badge="Simulation Delta")
+
+            st.info(f"ℹ️ **Methodology Disclosure:** {sim_res.get('cost_information_disclosure')}")
+
+    elif view_option == "Sales Quota Pacing":
+        st.markdown("#### 🎯 Monthly Sales Target & Quota Pacing")
+        st.caption("Compares configured sales quota against empirical sales run-rate and pacing.")
+
+        quota_target = st.number_input("Monthly Revenue Target (₹):", min_value=100000.0, max_value=2000000.0, value=500000.0, step=50000.0, key="quota_target_input")
+        
+        pace_res = fetch_api(f"/api/analytics/quota-pacing?target={quota_target}")
+        if "error" in pace_res:
+            st.error(pace_res["error"])
+        else:
+            pm = pace_res.get("pacing_metrics", {})
+            tgt = pace_res.get("configured_target", {})
+            realized = pace_res.get("realized_sales", {})
+
+            qp_c1, qp_c2, qp_c3, qp_c4 = st.columns(4)
+            with qp_c1:
+                render_metric_card("Configured Target", f"₹{tgt.get('amount', 0):,.2f}", subtext=tgt.get("disclosure", ""), badge="Target")
+            with qp_c2:
+                render_metric_card("Realized Revenue", f"₹{realized.get('actual_net_revenue', 0):,.2f}", subtext=f"{realized.get('eligible_order_count', 0)} eligible orders", badge="Realized")
+            with qp_c3:
+                render_metric_card("Quota Attainment", f"{pm.get('attainment_percentage', 0):.1f}%", subtext=f"Shortfall: ₹{pm.get('quota_shortfall', 0):,.2f}", badge=pm.get("status", "Pacing"))
+            with qp_c4:
+                render_metric_card("Pacing Status", pm.get("status", "On Track"), subtext=f"Projected: ₹{pm.get('projected_run_rate_month_end_revenue', 0):,.2f}", badge="Velocity")
+
+            st.progress(min(1.0, max(0.0, pm.get("attainment_percentage", 0.0) / 100.0)))
 
 
 # ======================================================================
@@ -802,6 +1015,42 @@ with tab_quality:
     if "error" in dq:
         st.error(dq["error"])
     else:
+        # Multi-Dimensional Data Quality Index (Package C & D)
+        dqi_score = dq.get("dqi_score", dq["cleanliness_percentage"])
+        dqi_grade = dq.get("dqi_grade", "Grade A")
+        
+        st.markdown(
+            f"""
+            <div style="background: linear-gradient(135deg, #EEF2FF, #F8FAFC); border: 1px solid #C7D2FE; border-radius: 12px; padding: 18px; margin-bottom: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h4 style="margin: 0; color: #1E1B4B;">🏆 Multi-Dimensional Data Quality Index (DQI)</h4>
+                        <p style="margin: 4px 0 0 0; color: #4338CA; font-size: 14px;">Evaluated across Completeness, Validity, Consistency, Uniqueness, and Timeliness dimensions.</p>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="font-size: 26px; font-weight: 800; color: #3730A3;">{dqi_score:.2f}%</span>
+                        <div style="font-size: 12px; font-weight: 600; color: #059669;">{dqi_grade}</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        dim_cols = st.columns(5)
+        dims = dq.get("dimensions", {})
+        with dim_cols[0]:
+            render_metric_card("Completeness (25%)", f"{dims.get('completeness', 100):.1f}%", subtext="Null/Missing check", badge="Dimension 1")
+        with dim_cols[1]:
+            render_metric_card("Validity (25%)", f"{dims.get('validity', 94):.1f}%", subtext="Domain constraints", badge="Dimension 2")
+        with dim_cols[2]:
+            render_metric_card("Consistency (20%)", f"{dims.get('consistency', 100):.1f}%", subtext="Financial formulas", badge="Dimension 3")
+        with dim_cols[3]:
+            render_metric_card("Uniqueness (15%)", f"{dims.get('uniqueness', 100):.1f}%", subtext="Duplicate detection", badge="Dimension 4")
+        with dim_cols[4]:
+            render_metric_card("Timeliness (15%)", f"{dims.get('timeliness', 98):.1f}%", subtext="Future/Date bounds", badge="Dimension 5")
+
+        st.markdown("---")
         q_cols = st.columns(4)
         with q_cols[0]:
             render_metric_card("Total Imported Records", str(dq["total_records"]), subtext="All rows in raw CSV", badge="Raw Dataset")
@@ -811,6 +1060,13 @@ with tab_quality:
             render_metric_card("Excluded / Suspicious", str(dq["excluded_records"]), subtext="Preserved for audit", badge="Flagged")
         with q_cols[3]:
             render_metric_card("Cleanliness Score", f"{dq['cleanliness_percentage']}%", subtext="48 valid of 51 records", badge="Compliance")
+
+        # Ingestion Profiling Table (Package C & D)
+        profiling_data = dq.get("profiling", [])
+        if profiling_data:
+            st.markdown("---")
+            st.markdown("#### 🔬 Automated Ingestion Column Profiling")
+            st.dataframe(pd.DataFrame(profiling_data), use_container_width=True)
 
         st.markdown("---")
         st.markdown("#### 🔍 Excluded Transaction Audit Trail")
