@@ -35,6 +35,10 @@ from backend.analytics import (
     get_category_revenue_breakdown,
     get_sales_channel_comparison,
     get_dashboard_summary_metrics,
+    detect_anomalies,
+    get_pareto_revenue_concentration,
+    simulate_what_if_revenue,
+    get_sales_target_pacing,
 )
 from backend.ai_service import ai_service
 from backend.report_exporter import (
@@ -571,6 +575,72 @@ def get_category_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
 def get_channel_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Returns sales channel performance (Online vs Retail)."""
     return get_sales_channel_comparison(db)
+
+
+@app.get("/api/analytics/anomalies", tags=["Advanced Analytics"])
+def get_anomaly_analytics(
+    z_threshold: float = 2.5,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Dict[str, Any]:
+    """
+    Detects statistical outliers (IQR and Z-score) and lists confirmed data quality errors.
+    Protected by Analyst or Admin RBAC role.
+    """
+    return detect_anomalies(db, z_threshold=z_threshold)
+
+
+@app.get("/api/analytics/pareto", tags=["Advanced Analytics"])
+def get_pareto_analytics(
+    cutoff: float = 80.0,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Dict[str, Any]:
+    """
+    Calculates Pareto 80/20 revenue concentration with explicit denominator.
+    Protected by Analyst or Admin RBAC role.
+    """
+    return get_pareto_revenue_concentration(db, top_pct_cutoff=cutoff)
+
+
+@app.post("/api/analytics/what-if", tags=["Advanced Analytics"])
+def run_what_if_simulation(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Dict[str, Any]:
+    """
+    Simulates revenue impact of price, volume, and discount adjustments without inventing costs.
+    Protected by Analyst or Admin RBAC role.
+    """
+    return simulate_what_if_revenue(
+        db,
+        price_change_pct=float(payload.get("price_change_pct", 0.0)),
+        volume_change_pct=float(payload.get("volume_change_pct", 0.0)),
+        discount_adjustment_pct=float(payload.get("discount_adjustment_pct", 0.0)),
+        category=payload.get("category"),
+        channel=payload.get("channel"),
+    )
+
+
+@app.get("/api/analytics/quota-pacing", tags=["Advanced Analytics"])
+def get_quota_pacing_analytics(
+    target: float = 500000.0,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_analyst_or_admin),
+) -> Dict[str, Any]:
+    """
+    Evaluates quota pacing comparing configured target against empirical sales data.
+    Protected by Analyst or Admin RBAC role.
+    """
+    return get_sales_target_pacing(
+        db,
+        monthly_target=target,
+        target_year=year,
+        target_month=month,
+    )
 
 
 @app.get("/api/data-quality", response_model=DataQualityReport, tags=["Data Quality"])

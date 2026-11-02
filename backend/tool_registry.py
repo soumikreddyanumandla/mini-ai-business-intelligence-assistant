@@ -426,3 +426,101 @@ registry.register(
     )
 )
 
+# ----------------------------------------------------------------------
+# Phase 2 – Package B: Advanced Analytics Tools
+# ----------------------------------------------------------------------
+
+registry.register(
+    ToolDefinition(
+        name="anomaly_detection",
+        description="Performs IQR and Z-score anomaly detection on sales transactions, distinguishing statistical outliers from confirmed data quality errors.",
+        handler=lambda db, **kwargs: analytics.detect_anomalies(db, **kwargs),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "z_threshold": {"type": "number", "description": "Z-score outlier threshold, default 2.5."}
+            },
+        },
+        sql_summary="SELECT transaction_id, net_revenue, is_eligible FROM sales_transactions",
+        default_chart_type="table",
+        example_questions=[
+            "Detect sales anomalies.",
+            "Show revenue outliers and anomalies.",
+            "Are there any statistical anomalies in transactions?",
+            "Find unusual sales transactions.",
+        ],
+    )
+)
+
+registry.register(
+    ToolDefinition(
+        name="revenue_concentration",
+        description="Calculates Pareto 80/20 revenue concentration, identifying the vital few products driving 80% of net revenue with clear denominator.",
+        handler=lambda db, **kwargs: analytics.get_pareto_revenue_concentration(db, **kwargs),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "top_pct_cutoff": {"type": "number", "description": "Cumulative percentage cutoff, default 80.0."}
+            },
+        },
+        sql_summary="SELECT product, SUM(net_revenue) FROM sales_transactions WHERE is_eligible = 1 GROUP BY product ORDER BY SUM(net_revenue) DESC",
+        default_chart_type="bar",
+        example_questions=[
+            "Show Pareto 80/20 analysis.",
+            "What is our revenue concentration?",
+            "Which products generate 80% of our revenue?",
+            "Pareto distribution of sales.",
+        ],
+    )
+)
+
+registry.register(
+    ToolDefinition(
+        name="what_if_simulation",
+        description="Simulates revenue what-if scenarios adjusting price, volume, and discount parameters without inventing fictitious costs.",
+        handler=lambda db, **kwargs: analytics.simulate_what_if_revenue(db, **kwargs),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "price_change_pct": {"type": "number", "description": "Percentage change in unit prices (e.g. 10.0 for +10%)."},
+                "volume_change_pct": {"type": "number", "description": "Percentage change in sales volume (e.g. -5.0 for -5%)."},
+                "discount_adjustment_pct": {"type": "number", "description": "Percentage change in discount rates (e.g. -10.0 for -10%)."},
+                "category": {"type": "string", "description": "Optional category filter."},
+                "channel": {"type": "string", "description": "Optional sales channel filter."},
+            },
+        },
+        sql_summary="SELECT product, quantity, unit_price, discount_amount, net_revenue FROM sales_transactions WHERE is_eligible = 1",
+        default_chart_type="bar",
+        example_questions=[
+            "What if prices increase by 10%?",
+            "Simulate a 5% volume increase and 10% discount cut.",
+            "What-if revenue simulation.",
+            "Simulate price increase for Electronics.",
+        ],
+    )
+)
+
+registry.register(
+    ToolDefinition(
+        name="quota_pacing",
+        description="Evaluates sales target and quota pacing, comparing configured business targets against empirical realized sales run-rate.",
+        handler=lambda db, **kwargs: analytics.get_sales_target_pacing(db, **kwargs),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "monthly_target": {"type": "number", "description": "Configured monthly sales quota (e.g. 500000)."},
+                "target_year": {"type": "integer", "description": "Optional year."},
+                "target_month": {"type": "integer", "description": "Optional month (1-12)."},
+            },
+        },
+        sql_summary="SELECT SUM(net_revenue), count(*) FROM sales_transactions WHERE is_eligible = 1 AND order_date BETWEEN :start AND :end",
+        default_chart_type="metric",
+        example_questions=[
+            "What is our sales quota pacing?",
+            "Are we on track to hit our sales target?",
+            "Sales target pacing analysis.",
+            "Quota pacing for 500000 target.",
+        ],
+    )
+)
+

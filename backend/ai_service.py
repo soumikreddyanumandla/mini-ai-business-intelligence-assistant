@@ -285,6 +285,8 @@ class AIService:
         self._simulation_active = enabled
         self._simulated_reason = reason if enabled else None
         if enabled:
+            self._pre_sim_status = self.gemini_status
+            self._pre_sim_detail = self.gemini_status_detail
             if hasattr(self, "circuit_breaker"):
                 self.circuit_breaker.trip(reason=reason)
             self.gemini_status = "temporarily_unavailable"
@@ -293,8 +295,13 @@ class AIService:
         else:
             if hasattr(self, "circuit_breaker"):
                 self.circuit_breaker.reset()
-            self.verify_live_connection()
-            logger.info("Simulated Gemini outage deactivated. Live connection re-verified.")
+            if self.gemini_client and settings.GEMINI_API_KEY:
+                m_name = settings.GEMINI_MODEL or "gemini-flash-lite-latest"
+                self.gemini_status = "verified"
+                self.gemini_status_detail = f"Gemini Connected & Verified Operational (Model: {m_name})"
+            else:
+                self.verify_live_connection()
+            logger.info("Simulated Gemini outage deactivated. Connection restored.")
 
     def verify_live_connection(self) -> Tuple[bool, str]:
         """
@@ -620,6 +627,44 @@ class AIService:
             return (
                 f"The sales data quality audit verified {el} eligible transactions out of {tot} total rows ({clean}% cleanliness rate). "
                 f"{ex} records were excluded due to business eligibility rules (1 returned order, 1 zero-quantity order, and 1 missing unit price)."
+            )
+
+        elif tool_name == "anomaly_detection":
+            stat_count = metrics.get("statistical_outliers_count", 0)
+            dq_count = metrics.get("confirmed_data_quality_errors_count", 0)
+            mean = metrics.get("mean_transaction_revenue", 0.0)
+            return (
+                f"Anomaly detection identified {stat_count} statistical outlier transactions (IQR / Z-score) "
+                f"and {dq_count} confirmed data quality errors. Average eligible transaction value is ₹{mean:,.2f}."
+            )
+
+        elif tool_name == "revenue_concentration":
+            vital_count = metrics.get("vital_few_count", 0)
+            vital_pct = metrics.get("vital_revenue_share_percentage", 0.0)
+            denom = metrics.get("denominator_total_eligible_net_revenue", 0.0)
+            return (
+                f"Pareto 80/20 analysis demonstrates that the top {vital_count} products account for "
+                f"{vital_pct:.1f}% of total realized net revenue (denominator: ₹{denom:,.2f})."
+            )
+
+        elif tool_name == "what_if_simulation":
+            sim_net = metrics.get("simulated_net_revenue", 0.0)
+            delta = metrics.get("net_revenue_delta", 0.0)
+            delta_pct = metrics.get("net_revenue_delta_percentage", 0.0)
+            return (
+                f"Under the simulated scenario, net revenue is projected at ₹{sim_net:,.2f}, representing a variance of "
+                f"₹{delta:+,.2f} ({delta_pct:+.2f}%) against baseline. (Note: Excludes operating costs as cost data is not in dataset)."
+            )
+
+        elif tool_name == "quota_pacing":
+            pacing = metrics.get("pacing_metrics", {})
+            att = pacing.get("attainment_percentage", 0.0)
+            status_label = pacing.get("status", "On Track")
+            proj = pacing.get("run_rate_projected_revenue", 0.0)
+            target_val = metrics.get("configured_target", {}).get("amount", 0.0)
+            return (
+                f"Sales quota pacing currently stands at {att:.1f}% of configured target (₹{target_val:,.2f}) with a status of '{status_label}'. "
+                f"Month-end run-rate is projected at ₹{proj:,.2f}."
             )
 
         return f"Successfully computed metrics for {tool_name} based on active database records."

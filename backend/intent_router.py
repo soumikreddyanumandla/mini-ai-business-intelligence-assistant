@@ -318,6 +318,32 @@ def fallback_classify_intent(query: str) -> IntentInterpretation:
     ]):
         return IntentInterpretation(intent="data_quality_audit", category=QuestionCategory.SUPPORTED, confidence=0.95)
 
+    # Phase 2 – Package B Tools
+    if any(p in lowered for p in ["anomaly", "anomalies", "outlier", "outliers", "unusual transaction", "irregular sales"]):
+        return IntentInterpretation(intent="anomaly_detection", category=QuestionCategory.SUPPORTED, confidence=0.95)
+
+    if any(p in lowered for p in ["pareto", "80/20", "80-20", "revenue concentration", "vital few", "80% of revenue"]):
+        return IntentInterpretation(intent="revenue_concentration", category=QuestionCategory.SUPPORTED, confidence=0.95)
+
+    if any(p in lowered for p in ["what if", "what-if", "simulate", "scenario", "price elasticity"]):
+        params = {}
+        pct_match = re.search(r"([+-]?\d+(?:\.\d+)?)\s*%", clean)
+        if pct_match:
+            pct_val = float(pct_match.group(1))
+            if "price" in lowered:
+                params["price_change_pct"] = pct_val
+            elif "volume" in lowered or "unit" in lowered or "quantity" in lowered:
+                params["volume_change_pct"] = pct_val
+            elif "discount" in lowered:
+                params["discount_adjustment_pct"] = pct_val
+        return IntentInterpretation(intent="what_if_simulation", category=QuestionCategory.SUPPORTED, parameters=params, confidence=0.95)
+
+    if any(p in lowered for p in ["quota", "pacing", "sales target", "target pacing", "quota pacing", "run-rate"]):
+        params = {}
+        target_num = re.search(r"\b(\d{4,9})\b", clean)
+        if target_num:
+            params["monthly_target"] = float(target_num.group(1))
+        return IntentInterpretation(intent="quota_pacing", category=QuestionCategory.SUPPORTED, parameters=params, confidence=0.95)
 
     # 6. Fallback if general sales query
     if any(w in lowered for w in ["revenue", "sales", "money", "earn"]):
