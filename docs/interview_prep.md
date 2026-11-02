@@ -526,3 +526,55 @@ if st.session_state.chat_history:
         mime="text/csv",
     )
 ```
+
+---
+
+# 5. ENHANCEMENT PACKAGES A, B, C, D MASTERCLASS (INTERVIEW DEFENSE)
+
+### Component 9: Step 0 Prompt Injection & Jailbreak Defense (`backend/security.py`)
+- **What it does:** Scans incoming natural-language strings against compiled regex patterns for instruction overrides, role elevation (`DAN mode`, `developer override mode`, `root admin`), system prompt extraction, and delimiter injection (````system```) before LLM or DB invocation.
+- **Why it is required:** Enterprise AI systems connected to corporate databases are vulnerable to prompt injection, where malicious users manipulate the LLM into disclosing hidden system instructions or bypassing authorization.
+- **How it works:** Pre-screen executes in $< 1\text{ms}$. If an adversarial pattern matches, execution immediately halts, returning Category 4 (`Security Guardrail Violation`), and records a `PROMPT_INJECTION_BLOCKED` event in `SecurityAuditLog`.
+- **Interviewer Defense:** *"We don't rely solely on the LLM's own safety alignment. We enforce defense-in-depth: Step 0 regex filtering catches known attack vectors, while backend tool allowlisting ensures that even if an injection bypassed Step 0, the LLM cannot execute arbitrary SQL or access unapproved tools."*
+
+---
+
+### Component 10: In-Memory Sliding-Window Rate Limiting (`backend/security.py`)
+- **What it does:** Tracks request frequency per client IP over rolling 60-second time windows using Python deques protected by reentrant locks (`threading.RLock`).
+- **Why it is required:** Protects against Denial-of-Service (DoS) attacks and brute-force token exhaustion on cloud LLM endpoints.
+- **Scope & Trade-off:** Operates entirely in-memory per process with zero Redis or external daemon dependencies. Scoped per worker process.
+- **Interviewer Defense:** *"For a standalone deployment, an in-memory sliding window provides sub-millisecond thread-safe throttling without adding external operational complexity like Redis. In an AWS ECS multi-container deployment, we would offload rate limiting to AWS WAF or Amazon API Gateway."*
+
+---
+
+### Component 11: CSV Formula Injection Sanitization (`backend/security.py` & `report_exporter.py`)
+- **What it does:** Prepends a single quote (`'`) to any spreadsheet export cell value beginning with dangerous formula triggers (`=`, `+`, `-`, `@`, `\t`, `\r`).
+- **Why it is required:** Spreadsheet applications like Microsoft Excel and Google Sheets automatically execute formulas starting with these characters as Dynamic Data Exchange (DDE) formulas or macro commands.
+- **Non-Destructive Guarantee:** Crucially, sanitization occurs *only during CSV string generation*. The original database records in SQLite remain untouched.
+
+---
+
+### Component 12: Advanced Analytics Engine (`backend/analytics.py`)
+- **Anomaly Detection:** Distinguishes valid statistical outliers (IQR bounds, Z-score $> 2.5$) in eligible sales from confirmed data quality errors (e.g., negative quantities or missing prices).
+- **Pareto 80/20 Revenue Concentration:** Explicitly computes cumulative product contributions against the audited denominator ($\text{₹1,439,200.00}$) to identify the "vital few" products (top 5 drive 88.0% of sales).
+- **What-If Revenue Simulation:** Models percentage adjustments to price, volume, and discount. Explicitly discloses: *"Dataset does not contain cost data; simulation models revenue impacts without inventing product costs or margins."*
+- **Sales Target Pacing:** Compares monthly revenue goals against empirical daily run-rate velocity and projects month-end outcomes.
+
+---
+
+### Component 13: Multi-Dimensional Data Quality Index (DQI) (`backend/data_cleaning.py`)
+- **What it does:** Synthesizes a composite 0–100 quality score across 5 standard data governance dimensions:
+  1. **Completeness (25%):** Missing/null values in required columns.
+  2. **Validity (25%):** Adherence to business constraints (price $> 0$, quantity $> 0$, valid status).
+  3. **Consistency (20%):** Mathematical integrity ($\text{Net} == \text{Gross} - \text{Discount}$).
+  4. **Uniqueness (15%):** Duplicated transaction IDs.
+  5. **Timeliness (15%):** Order date boundaries within operating period.
+- **Current Dataset Score:** **98.19%** (`Grade A+ • Production Ready`).
+
+---
+
+### Component 14: Provenance Metadata & Numerical Grounding Guarantee (`backend/ai_service.py`)
+- **What it does:** Every query response contains a `provenance` dictionary describing the executed operation, target table, eligible rows used (`48`), excluded rows omitted (`3`), applied parameters, and audit timestamp.
+- **Zero-Hallucination Proof:** The automated test suite (`tests/test_evaluation_package_d.py`) queries SQLite directly for mathematical ground truth and verifies that `/api/ask` responses match to 2 decimal places with **0.00% numerical discrepancy**.
+
+```

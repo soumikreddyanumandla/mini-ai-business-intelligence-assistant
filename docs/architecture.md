@@ -211,3 +211,73 @@ graph LR
 3. **Amazon RDS / Aurora Serverless:** Upgrades SQLite to managed PostgreSQL for horizontal scalability, read replicas, and VPC security.
 4. **Amazon Bedrock / SageMaker:** Enables private enterprise LLMs (Claude 3.5 Sonnet, Llama 3, Amazon Titan) inside private AWS subnets.
 5. **Amazon Lex:** Provides native omnichannel conversational bots (voice and chat) integrating directly with the backend tool router.
+
+---
+
+## 7. Security Hardening & AI Guardrails (Enhancement Package A)
+
+Enterprise Generative AI deployments require multi-layered defensive controls:
+
+```mermaid
+flowchart TD
+    Req[Incoming HTTP Request] --> RL{In-Memory Rate Limiter<br>60 req/min /api/ask<br>10 req/min /api/upload}
+    RL -->|Limit Exceeded| HTTP429[HTTP 429 Too Many Requests]
+    RL -->|Allowed| RBAC{RBAC Authorization<br>Admin, Analyst, Viewer}
+    RBAC -->|Forbidden| HTTP403[HTTP 403 Forbidden]
+    RBAC -->|Authorized| Guard{Step 0: Prompt Injection Guard<br>Regex & Delimiter Prescreen}
+    Guard -->|Adversarial Pattern| SecLog[Log to SecurityAuditLog]
+    SecLog --> SafeReject[Category 4: Unrelated / Blocked Safe Response]
+    Guard -->|Clean Prompt| AIOrch[AI Intent Classifier & Safe Tool Execution]
+    AIOrch --> DB[(SQLite Database)]
+    DB --> ExportCheck{CSV / Spreadsheet Export?}
+    ExportCheck -->|Yes| Sanitize[CSV Formula Sanitizer<br>Neutralize = + - @ \t \r]
+    ExportCheck -->|No| Output[JSON Response with Provenance]
+    Sanitize --> Output
+```
+
+1. **Step 0 Prompt Injection Pre-Screen:** Evaluates input queries against compiled regular expressions targeting prompt leakage, role elevation (`DAN mode`, `developer override mode`, `grant root admin`), delimiter hijacking (```system, ```admin), and jailbreak framing. Violations are short-circuited before any LLM or DB invocation, returning Category 4 (`Security Guardrail Violation`) and auditing the incident.
+2. **Thread-Safe In-Memory Sliding-Window Rate Limiting:** Enforces fine-grained per-IP request throttling using thread-safe sliding deque windows (`InMemoryRateLimiter`). Scoped per worker process (no external Redis dependency required). Throttles `/api/ask` (60 req/min) and `/api/upload` (10 req/min).
+3. **CSV Formula Injection Sanitization:** Spreadsheet applications (Excel, Google Sheets) execute cells beginning with `=`, `+`, `-`, `@`, `\t`, or `\r` as dynamic executable macros. The exporter prepends a single apostrophe (`'`) to cell strings during export generation while strictly preserving the pristine raw records in the SQLite database.
+4. **Security Audit Logging:** All security-relevant events (authentication attempts, prompt injection rejections, rate-limit trips, dataset resets, and API key modifications) are persisted to the `security_audit_logs` table with timestamps, IP address, user role, and audit details. Exposed via `GET /api/security/audit-logs` (Admin only).
+
+---
+
+## 8. Advanced Analytics Engine (Enhancement Package B)
+
+Extends deterministic analytics with four specialized algorithms:
+
+1. **Statistical Anomaly Detection (IQR & Z-Score):**
+   - Employs Interquartile Range ($Q_1 - 1.5 \times \text{IQR}$, $Q_3 + 1.5 \times \text{IQR}$) and Z-score thresholding ($|Z| \ge 2.5$) on eligible transaction net revenues.
+   - **Crucial Governance Distinction:** Cleanly separates legitimate statistical transaction outliers (e.g., valid high-value enterprise bulk purchases) from confirmed data-quality policy errors (e.g., negative quantities or missing prices).
+2. **Pareto 80/20 Revenue Concentration:**
+   - Evaluates cumulative product net revenue contributions to determine the "vital few" driving 80% of sales.
+   - **Explicit Denominator Guarantee:** State the exact denominator ($\text{Total Audited Eligible Net Revenue} = \text{₹1,439,200.00}$) to avoid ambiguous or distorted percentage representations.
+3. **What-If Revenue Simulation:**
+   - Evaluates prospective financial impacts of price variations ($\Delta P\%$), volume adjustments ($\Delta Q\%$), and discount modifications ($\Delta D\%$).
+   - **Methodological Boundary:** Explicitly simulates revenue deltas without fabricating product costs or profit margins, as the current enterprise dataset does not contain cost data.
+4. **Sales Target & Quota Pacing:**
+   - Compares configured revenue targets against empirical sales data. Calculates attainment percentage, daily run-rate velocity, and projected period-end revenue against required run-rates.
+
+---
+
+## 9. Data Intelligence & Provenance (Enhancement Package C)
+
+1. **Multi-Dimensional Data Quality Index (DQI):**
+   - Synthesizes a composite 0–100 quality score across five standardized data governance dimensions:
+     - **Completeness (25% weight):** Assesses null or missing fields in mandatory columns.
+     - **Validity (25% weight):** Validates business constraints (e.g., unit price $> 0$, quantity $> 0$, valid status enum).
+     - **Consistency (20% weight):** Verifies arithmetic integrity ($\text{Net Revenue} == \text{Gross Revenue} - \text{Discount}$).
+     - **Uniqueness (15% weight):** Verifies absence of duplicated transaction identifiers.
+     - **Timeliness (15% weight):** Confirms order dates conform to operating period bounds without future dates.
+   - Categorizes dataset into governance grades: **Grade A+** ($\ge 95\%$), **Grade A** ($\ge 90\%$), **Grade B** ($\ge 80\%$), **Grade C** ($\ge 70\%$), or **Grade D** ($< 70\%$).
+2. **Automated Ingestion Column Profiling:** Profiles uploaded CSVs during ingestion, recording inferred data types, populated/null counts, unique cardinality, and value distribution bounds.
+3. **Source Provenance Metadata:** Every conversational AI query response includes an explicit `provenance` dictionary identifying the executed tool operation, target database entity, eligible row count used, excluded rows omitted, applied filter parameters, and deterministic SQLite ORM calculation guarantee. Raw SQL strings are never exposed to ordinary users.
+
+---
+
+## 10. Dashboard & AI Evaluation (Enhancement Package D)
+
+1. **Interactive Multi-Dimensional Filtering:** Executive dashboard features dynamic filtering across Region (North, South, East, West), Channel (Online, Retail), Category (Electronics, Furniture), and Order Date range with instant KPI updates.
+2. **Expandable Provenance Cards:** Streamlit assistant renders interactive provenance disclosure cards beneath AI answers displaying execution engine, row counts, and zero-hallucination verification guarantees.
+3. **Adversarial & Numerical Grounding Evaluation:** Automated test suite tests prompt injection payloads and compares assistant calculations against SQLite database ground truth, verifying a 0.00% numerical hallucination rate across all analytical metrics.
+
