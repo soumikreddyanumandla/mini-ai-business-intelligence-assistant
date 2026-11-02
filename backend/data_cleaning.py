@@ -176,3 +176,283 @@ def clean_and_validate_record(raw: Dict[str, Any]) -> RecordValidationResult:
         is_eligible=is_eligible,
         exclusion_reasons=reasons,
     )
+
+
+# ======================================================================
+# Phase 3 – Package C: Data Quality Index (DQI) & Ingestion Profiling
+# ======================================================================
+
+VALID_CATEGORIES = {"electronics", "office supplies", "furniture", "accessories"}
+VALID_REGIONS = {"north", "south", "east", "west", "central"}
+VALID_CHANNELS = {"online", "retail", "direct", "wholesale"}
+VALID_STATUSES = {"completed", "returned", "pending", "cancelled"}
+
+MANDATORY_FIELDS = [
+    "Transaction_Id", "Order_date", "Product", "Category",
+    "Region", "Sales_channel", "Quantity", "Unit_price",
+    "Discount_amount", "Status"
+]
+
+
+def calculate_data_quality_index(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Computes a Multi-Dimensional Data Quality Index (DQI) score (0-100) across 5 dimensions:
+    1. Completeness (25% weight): Ratio of populated mandatory fields.
+    2. Validity (25% weight): Ratio of records with positive quantities, positive prices, valid status.
+    3. Consistency (20% weight): Ratio of records with mathematically sound revenue & discount relations.
+    4. Uniqueness (15% weight): Absence of duplicated transaction IDs.
+    5. Timeliness / Recency (15% weight): Ratio of records with valid parseable dates within logical bounds.
+    """
+    total = len(records)
+    if total == 0:
+        return {
+            "composite_dqi_score": 0.0,
+            "dqi_grade": "Not Available (Empty Dataset)",
+            "dimensions": {},
+            "total_records": 0,
+        }
+
+    # 1. Completeness
+    total_cells = total * len(MANDATORY_FIELDS)
+    populated_cells = 0
+    for r in records:
+        for f in MANDATORY_FIELDS:
+            val = None
+            for k in r:
+                if k.strip().lower() == f.lower():
+                    val = r[k]
+                    break
+            if val is not None and str(val).strip() != "":
+                populated_cells += 1
+    completeness_score = round((populated_cells / total_cells) * 100.0, 2) if total_cells > 0 else 0.0
+
+    # 2. Validity
+    valid_count = 0
+    for r in records:
+        qty_val = None
+        price_val = None
+        disc_val = 0.0
+        status_val = ""
+        for k, v in r.items():
+            kl = k.strip().lower()
+            if kl == "quantity":
+                qty_val = v
+            elif kl == "unit_price":
+                price_val = v
+            elif kl == "discount_amount":
+                disc_val = v
+            elif kl == "status":
+                status_val = str(v).strip().lower()
+
+        try:
+            q_ok = int(str(qty_val).strip()) > 0 if qty_val is not None else False
+        except (ValueError, TypeError):
+            q_ok = False
+
+        try:
+            p_ok = float(str(price_val).strip()) > 0 if price_val is not None else False
+        except (ValueError, TypeError):
+            p_ok = False
+
+        try:
+            d_ok = float(str(disc_val).strip() or "0") >= 0
+        except (ValueError, TypeError):
+            d_ok = False
+
+        s_ok = status_val in VALID_STATUSES
+
+        if q_ok and p_ok and d_ok and s_ok:
+            valid_count += 1
+    validity_score = round((valid_count / total) * 100.0, 2)
+
+    # 3. Consistency
+    consistent_count = 0
+    for r in records:
+        qty = 0
+        price = 0.0
+        disc = 0.0
+        try:
+            for k, v in r.items():
+                kl = k.strip().lower()
+                if kl == "quantity" and v is not None:
+                    qty = int(str(v).strip())
+                elif kl == "unit_price" and v is not None:
+                    price = float(str(v).strip())
+                elif kl == "discount_amount" and v is not None:
+                    disc = float(str(v).strip() or "0")
+
+            if qty > 0 and price > 0:
+                gross = qty * price
+                if disc <= gross and disc >= 0:
+                    consistent_count += 1
+            else:
+                pass
+        except Exception:
+            pass
+    consistency_score = round((consistent_count / total) * 100.0, 2)
+
+    # 4. Uniqueness
+    tids = []
+    for r in records:
+        for k, v in r.items():
+            if k.strip().lower() == "transaction_id" and v is not None:
+                tids.append(str(v).strip())
+                break
+    unique_ids_count = len(set(tids))
+    uniqueness_score = round((unique_ids_count / total) * 100.0, 2)
+
+    # 5. Timeliness / Recency
+    dated_count = 0
+    for r in records:
+        for k, v in r.items():
+            if k.strip().lower() in ("order_date", "date") and v:
+                parsed = parse_flexible_date(v)
+                if parsed and parsed.year >= 2020:
+                    dated_count += 1
+                break
+    timeliness_score = round((dated_count / total) * 100.0, 2)
+
+    # Weighted Composite DQI
+    composite_dqi = round(
+        (0.25 * completeness_score)
+        + (0.25 * validity_score)
+        + (0.20 * consistency_score)
+        + (0.15 * uniqueness_score)
+        + (0.15 * timeliness_score),
+        2
+    )
+
+    if composite_dqi >= 95.0:
+        grade = "Excellent (Production Grade)"
+    elif composite_dqi >= 85.0:
+        grade = "Good (Acceptable with Minor Governance Warnings)"
+    elif composite_dqi >= 70.0:
+        grade = "Fair (Remediation Required)"
+    else:
+        grade = "Poor (Critical Data Governance Risks)"
+
+    return {
+        "composite_dqi_score": composite_dqi,
+        "dqi_grade": grade,
+        "total_records_evaluated": total,
+        "dimensions": {
+            "completeness": {
+                "score": completeness_score,
+                "weight": 0.25,
+                "description": "Presence of all mandatory transaction fields",
+                "status": "PASS" if completeness_score >= 90.0 else "WARN",
+            },
+            "validity": {
+                "score": validity_score,
+                "weight": 0.25,
+                "description": "Conformity to business domains (positive prices, positive quantities, valid statuses)",
+                "status": "PASS" if validity_score >= 90.0 else "WARN",
+            },
+            "consistency": {
+                "score": consistency_score,
+                "weight": 0.20,
+                "description": "Mathematical coherence across gross revenue, discounts, and net calculations",
+                "status": "PASS" if consistency_score >= 90.0 else "WARN",
+            },
+            "uniqueness": {
+                "score": uniqueness_score,
+                "weight": 0.15,
+                "description": "Absence of duplicate transaction identifiers",
+                "status": "PASS" if uniqueness_score >= 99.0 else "WARN",
+            },
+            "timeliness": {
+                "score": timeliness_score,
+                "weight": 0.15,
+                "description": "Chronological coherence and valid order dates",
+                "status": "PASS" if timeliness_score >= 95.0 else "WARN",
+            },
+        },
+    }
+
+
+def profile_csv_dataset(raw_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Automated CSV Ingestion Profiling:
+    Computes statistical and structural profiles for each column:
+    data type, null count, distinct values, and range distributions.
+    """
+    if not raw_rows:
+        return {"total_rows": 0, "columns": {}, "profiling_summary": "Empty dataset"}
+
+    total_rows = len(raw_rows)
+    all_keys = list(raw_rows[0].keys())
+    columns_profile = {}
+
+    for col in all_keys:
+        values = [r.get(col) for r in raw_rows]
+        non_null_values = [v for v in values if v is not None and str(v).strip() != ""]
+        null_count = total_rows - len(non_null_values)
+        null_pct = round((null_count / total_rows) * 100.0, 2)
+
+        inferred_type = "string"
+        int_count = 0
+        float_count = 0
+        date_count = 0
+        numeric_vals = []
+
+        for v in non_null_values:
+            s_val = str(v).strip()
+            try:
+                int_val = int(s_val)
+                int_count += 1
+                numeric_vals.append(float(int_val))
+                continue
+            except ValueError:
+                pass
+
+            try:
+                flt_val = float(s_val)
+                float_count += 1
+                numeric_vals.append(flt_val)
+                continue
+            except ValueError:
+                pass
+
+            if parse_flexible_date(s_val) is not None:
+                date_count += 1
+                continue
+
+        nn_len = len(non_null_values)
+        if nn_len > 0:
+            if int_count / nn_len >= 0.8:
+                inferred_type = "integer"
+            elif (int_count + float_count) / nn_len >= 0.8:
+                inferred_type = "float"
+            elif date_count / nn_len >= 0.8:
+                inferred_type = "date"
+            else:
+                inferred_type = "categorical/text"
+
+        unique_vals = list(set(str(v).strip() for v in non_null_values))
+        distinct_count = len(unique_vals)
+
+        col_stat = {
+            "column_name": col,
+            "inferred_type": inferred_type,
+            "total_count": total_rows,
+            "populated_count": len(non_null_values),
+            "null_count": null_count,
+            "null_percentage": null_pct,
+            "distinct_values_count": distinct_count,
+            "sample_values": unique_vals[:3],
+        }
+
+        if numeric_vals:
+            col_stat["min_value"] = round(min(numeric_vals), 2)
+            col_stat["max_value"] = round(max(numeric_vals), 2)
+
+        columns_profile[col] = col_stat
+
+    dqi_results = calculate_data_quality_index(raw_rows)
+
+    return {
+        "total_rows": total_rows,
+        "total_columns": len(all_keys),
+        "columns_profile": columns_profile,
+        "dqi": dqi_results,
+    }

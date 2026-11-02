@@ -688,6 +688,26 @@ def get_data_quality_report(db: Session = Depends(get_db)) -> DataQualityReport:
         f"Excluded for business/data-quality reasons: {len(excluded_rows)}",
     ]
 
+    all_txs = db.query(SalesTransaction).all()
+    records_dicts = [
+        {
+            "Transaction_Id": t.transaction_id,
+            "Order_date": t.order_date.isoformat() if t.order_date else "",
+            "Product": t.product,
+            "Category": t.category,
+            "Region": t.region,
+            "Sales_channel": t.sales_channel,
+            "Quantity": t.quantity,
+            "Unit_price": t.unit_price,
+            "Discount_amount": t.discount_amount,
+            "Status": t.status,
+        }
+        for t in all_txs
+    ]
+    from backend.data_cleaning import calculate_data_quality_index, profile_csv_dataset
+    dqi_res = calculate_data_quality_index(records_dicts)
+    profile_res = profile_csv_dataset(records_dicts)
+
     return DataQualityReport(
         total_records=total_records,
         eligible_records=eligible_count,
@@ -696,6 +716,10 @@ def get_data_quality_report(db: Session = Depends(get_db)) -> DataQualityReport:
         excluded_transactions=excluded_items,
         validation_rules=validation_rules,
         audit_notes=audit_notes,
+        dqi_score=dqi_res.get("composite_dqi_score", cleanliness_rate),
+        dqi_grade=dqi_res.get("dqi_grade", "Good"),
+        dimensions=dqi_res.get("dimensions", {}),
+        profiling=profile_res.get("columns_profile", {}),
     )
 
 

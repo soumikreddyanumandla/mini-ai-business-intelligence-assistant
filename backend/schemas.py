@@ -102,6 +102,10 @@ class QueryResponse(BaseModel):
     execution_time_ms: float = 0.0
     session_id: Optional[str] = "default"
     resolved_context: Optional[str] = None
+    provenance: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Data provenance metadata describing executed analytical operation, entity, and eligible row count."
+    )
 
 
 class DashboardMetrics(BaseModel):
@@ -141,6 +145,10 @@ class DataQualityReport(BaseModel):
     excluded_transactions: List[ExcludedTransactionItem]
     validation_rules: List[str]
     audit_notes: List[str]
+    dqi_score: Optional[float] = None
+    dqi_grade: Optional[str] = None
+    dimensions: Optional[Dict[str, Any]] = None
+    profiling: Optional[Dict[str, Any]] = None
 
 
 class SuggestionItem(BaseModel):

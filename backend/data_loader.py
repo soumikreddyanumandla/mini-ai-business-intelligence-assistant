@@ -14,7 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.database import SessionLocal, init_db
-from backend.data_cleaning import clean_and_validate_record, RecordValidationResult
+from backend.data_cleaning import (
+    clean_and_validate_record,
+    RecordValidationResult,
+    profile_csv_dataset,
+    calculate_data_quality_index,
+)
 from backend.exceptions import DatasetNotFoundError
 from backend.models import SalesTransaction, DataQualityLog
 
@@ -174,6 +179,10 @@ def load_and_sync_csv_to_db(
             round((eligible_count / total_records) * 100, 2) if total_records > 0 else 0.0
         )
 
+        # Automated CSV profiling and Multi-Dimensional Data Quality Index (DQI)
+        profile = profile_csv_dataset(raw_rows)
+        dqi_summary = profile.get("dqi", {})
+
         # Record Data Quality Log
         log_entry = DataQualityLog(
             source_filename=path_to_read.name,
@@ -183,6 +192,8 @@ def load_and_sync_csv_to_db(
             notes=json.dumps({
                 "cleanliness_percentage": cleanliness_rate,
                 "excluded_count": excluded_count,
+                "dqi_score": dqi_summary.get("composite_dqi_score", cleanliness_rate),
+                "dqi_grade": dqi_summary.get("dqi_grade", "Good"),
             }),
         )
 
@@ -198,7 +209,7 @@ def load_and_sync_csv_to_db(
 
         logger.info(
             f"Successfully synced {total_records} records to SQLite "
-            f"({eligible_count} eligible, {excluded_count} excluded)."
+            f"({eligible_count} eligible, {excluded_count} excluded, DQI: {dqi_summary.get('composite_dqi_score')}%)."
         )
 
         return {
@@ -207,6 +218,8 @@ def load_and_sync_csv_to_db(
             "excluded_count": excluded_count,
             "duplicate_count": duplicate_count,
             "cleanliness_rate": cleanliness_rate,
+            "dqi": dqi_summary,
+            "profiling": profile.get("columns_profile", {}),
             "excluded_records": excluded_details,
         }
 

@@ -42,6 +42,7 @@ from backend.tool_registry import registry
 from backend.conversation import conversation_manager
 from backend.metrics import metrics_collector
 from backend.security import inspect_prompt_safety, log_security_event
+from backend.models import SalesTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -847,6 +848,16 @@ class AIService:
                 answer = f"The average transaction value is ₹{metrics['average_transaction_value']:,.2f}."
             elif "total_units_sold" in metrics:
                 answer = f"{metrics.get('top_product')} sold the highest quantity ({metrics['total_units_sold']} units)."
+            elif "statistical_outliers_count" in metrics:
+                answer = f"Anomaly Detection: {metrics.get('statistical_outliers_count', 0)} statistical outliers and {metrics.get('confirmed_data_quality_errors_count', 0)} data quality errors flagged."
+            elif "vital_few_count" in metrics and "vital_revenue_share_percentage" in metrics:
+                answer = f"Pareto 80/20: Top {metrics['vital_few_count']} products drive {metrics['vital_revenue_share_percentage']:.1f}% of net revenue (denominator: ₹{metrics.get('denominator_total_eligible_net_revenue', 0.0):,.2f})."
+            elif "simulated_net_revenue" in metrics and "net_revenue_delta" in metrics:
+                answer = f"What-If Simulation: Projected net revenue is ₹{metrics['simulated_net_revenue']:,.2f} ({metrics['net_revenue_delta_percentage']:+.2f}% vs baseline)."
+            elif "pacing_metrics" in metrics and "configured_target" in metrics:
+                pm = metrics["pacing_metrics"]
+                tgt_amt = metrics["configured_target"].get("amount", 0.0)
+                answer = f"Quota Pacing: {pm.get('attainment_percentage', 0.0):.1f}% attained against ₹{tgt_amt:,.2f} target (Status: {pm.get('status', 'On Track')})."
 
             supporting = metrics.get("supporting_data", [])
             chart_type = metrics.get("chart_type", tool.default_chart_type)
@@ -856,6 +867,19 @@ class AIService:
             # Update conversational session memory
             session = conversation_manager.get_or_create_session(sid)
             session.add_turn(question, answer, tool_name, metrics)
+
+            # Build data provenance metadata describing executed operation and dataset scope
+            el_count = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == True).count()
+            ex_count = db.query(SalesTransaction).filter(SalesTransaction.is_eligible == False).count()
+            provenance_metadata = {
+                "operation": tool.description,
+                "target_entity": "sales_transactions",
+                "eligible_rows_used": el_count,
+                "excluded_rows_omitted": ex_count,
+                "applied_parameters": interpretation.parameters or {},
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "deterministic_guarantee": "Computed deterministically via SQLite ORM aggregation; zero AI numerical hallucination.",
+            }
 
             return QueryResponse(
                 success=True,
@@ -876,6 +900,7 @@ class AIService:
                 execution_time_ms=exec_time,
                 session_id=sid,
                 resolved_context=resolved_question if has_resolved_context else None,
+                provenance=provenance_metadata,
             )
 
         except Exception as e:
